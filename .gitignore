@@ -34,7 +34,6 @@ ghost_exploratory_results*/
 /tools/GHOST/*.md
 !/tools/GHOST/README.md
 /tools/GHOST/ghost_backend/airfoil.geo
-/tools/GHOST/ghost_backend/run_local_monostatic_exploratory.py
 /tools/FREDDY/tools/
 /tools/FREDDY/materials/validation/
 
