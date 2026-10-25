@@ -1,0 +1,121 @@
+"""ISAR control synchronization without touching the numerical worker."""
+from __future__ import annotations
+
+import numpy as np
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QWidget, QFormLayout, QComboBox,
+    QDoubleSpinBox, QSpinBox, QCheckBox,
+)
+
+
+def sync_frequency_controls(context, dataset):
+    """Display native frequency values with explicit units and acquired bounds."""
+    if context is None or dataset is None:
+        return
+    values = np.asarray(dataset.frequencies, dtype=float)
+    if not values.size or not np.all(np.isfinite(values)):
+        return
+    unit = str((dataset.units or {}).get("frequency", "")).strip()
+    lo, hi = float(values.min()), float(values.max())
+    key = (id(dataset), unit, lo, hi)
+    if getattr(context, "_isar_frequency_bounds", None) == key:
+        return
+    context._isar_frequency_bounds = key
+    for spin, value in ((context.spin_isar_freq_min, lo), (context.spin_isar_freq_max, hi)):
+        old = spin.blockSignals(True)
+        try:
+            spin.setDecimals(9)
+            spin.setRange(lo, hi)
+            spin.setSuffix(f" {unit}" if unit else "")
+            spin.setSingleStep(max((hi - lo) / 100.0, 1e-9))
+            spin.setValue(value)
+            spin.setToolTip(f"Frequency limit in the dataset's {unit or 'declared'} units.")
+        finally:
+            spin.blockSignals(old)
+
+
+
+
+class AdvancedIsarControls(QWidget):
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QFormLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.mode = QComboBox()
+        for label, value in (("Single coherent image", "coherent"),
+                             ("Qualitative max-look composite", "composite")):
+            self.mode.addItem(label, value)
+        self.mode.setEnabled(False)
+        self.mode.setToolTip("Selected by the ISAR or Composite plot button. ISAR forms a coherent sector or full-360° image; wide apertures use backprojection. Composite combines sublook magnitudes.")
+        layout.addRow("Image mode", self.mode)
+        self.scene = QCheckBox("Use scene bounds and crop result")
+        layout.addRow(self.scene)
+        self.x_half, self.y_half = QDoubleSpinBox(), QDoubleSpinBox()
+        for spin in (self.x_half, self.y_half):
+            spin.setRange(.000001, 100000.)
+            spin.setDecimals(6)
+            spin.setSuffix(" m")
+            spin.setValue(1.)
+            spin.setEnabled(False)
+            spin.setToolTip("Occupied scene half extent about the fixed phase origin. Cropping changes retained image size, not the acquired resolution.")
+        layout.addRow("Cross-range half extent", self.x_half)
+        layout.addRow("Range half extent", self.y_half)
+        self.side = QSpinBox()
+        self.side.setRange(32, 4096)
+        self.side.setSingleStep(256)
+        self.side.setValue(1024)
+        self.side.setToolTip("Composite grid pixels per side. More pixels do not improve physical resolution.")
+        layout.addRow("Composite pixels per side", self.side)
+        self.memory_auto = QCheckBox("Use half of available RAM")
+        self.memory_auto.setChecked(True)
+        self.memory_limit = QSpinBox()
+        self.memory_limit.setRange(1, 2_000_000_000)
+        self.memory_limit.setSuffix(" MiB")
+        from GRIM_Backend.isar.memory import resolve_memory_limit
+        self.memory_limit.setValue(max(1, resolve_memory_limit(use_environment=False) // 1024**2))
+        self.memory_limit.setEnabled(False)
+        self.memory_limit.setToolTip("Budget for ISAR formation and retained results. Large Fourier staging arrays can use temporary disk storage.")
+        self.memory_allow = QCheckBox("Allow computation above the memory budget")
+        self.memory_allow.setToolTip("Continue when the estimated working set exceeds the selected budget. The operating system may page or reject an allocation.")
+        layout.addRow("Memory budget", self.memory_auto)
+        layout.addRow("Custom budget", self.memory_limit)
+        layout.addRow(self.memory_allow)
+        self.memory_auto.toggled.connect(self._memory_changed)
+        self.memory_limit.valueChanged.connect(lambda _value: self.changed.emit())
+        self.memory_allow.toggled.connect(lambda _checked: self.changed.emit())
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.scene.toggled.connect(self._scene_changed)
+        for spin in (self.x_half, self.y_half):
+            spin.valueChanged.connect(lambda _=None: self.changed.emit() if self.scene.isChecked() else None)
+        self.side.valueChanged.connect(lambda: self.changed.emit() if self.side.isEnabled() else None)
+        self.set_plot_mode("isar_image")
+
+    def set_plot_mode(self, plot_mode):
+        value = "composite" if plot_mode == "isar_composite" else "coherent"
+        blocked = self.mode.blockSignals(True)
+        self.mode.setCurrentIndex(self.mode.findData(value))
+        self.mode.blockSignals(blocked)
+        self.side.setEnabled(value == "composite")
+
+    def _mode_changed(self):
+        self.side.setEnabled(self.mode.currentData() != 'coherent')
+        self.changed.emit()
+
+    def _scene_changed(self, enabled):
+        self.x_half.setEnabled(enabled)
+        self.y_half.setEnabled(enabled)
+        self.changed.emit()
+
+    def _memory_changed(self, automatic):
+        self.memory_limit.setEnabled(not automatic)
+        self.changed.emit()
+
+    def options(self):
+        return {"aperture_mode": self.mode.currentData(),
+                "scene_half_extent_m": (self.x_half.value(), self.y_half.value()) if self.scene.isChecked() else None,
+                "composite_side": self.side.value(),
+                "memory_limit_bytes": None if self.memory_auto.isChecked() else self.memory_limit.value() * 1024**2,
+                "memory_allow_exceed": self.memory_allow.isChecked()}

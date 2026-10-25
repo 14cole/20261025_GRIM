@@ -1,0 +1,48 @@
+# Local environments, editor state, and Python/build caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.vscode/
+.idea/
+.env
+.env.*
+
+# Development-only tests, audits, examples, and generated outputs.
+tests/
+scripts/
+Claude_Audit/
+Run_Recovery/
+ghost_exploratory_results*/
+*.grim
+*.npz
+*.log
+*.lock
+*.dll
+*.so
+*.dylib
+/airfoil.geo
+/GRIM_Backend/docs/
+/GRIM_Backend/examples/
+/GRIM_Backend/io/reference/
+/tools/GHOST/*.md
+!/tools/GHOST/README.md
+/tools/GHOST/ghost_backend/airfoil.geo
+/tools/GHOST/ghost_backend/run_local_monostatic_exploratory.py
+/tools/FREDDY/tools/
+/tools/FREDDY/materials/validation/
+
+# These five services are required by the existing GHOST integration;
+# omit the standalone validation cases, runners, and reference datasets.
+/tools/GHOST/ghost_backend/validation/*
+!/tools/GHOST/ghost_backend/validation/__init__.py
+!/tools/GHOST/ghost_backend/validation/cylinder.py
+!/tools/GHOST/ghost_backend/validation/sphere.py
+!/tools/GHOST/ghost_backend/validation/feature_family.py
+!/tools/GHOST/ghost_backend/validation/reconstruction.py
