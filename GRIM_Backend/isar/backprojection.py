@@ -124,7 +124,8 @@ def form_band(params, indices, plan, resident_bytes=0):
         az, freq, params.get('elevation_deg', 0.), params.get('scene_half_extent_m'), params.get('az_center_deg'))
     x, y = axes
     cells = len(x) * len(y)
-    core._validate_isar_working_set(working_set_bytes(axes, len(freq)),
+    native_bytes = 16 * len(ids) * len(freq) if params.get('retain_complex') else 0
+    core._validate_isar_working_set(working_set_bytes(axes, len(freq)) + native_bytes,
         operation='Coherent backprojection', resident_bytes=resident_bytes)
     digest = core._selected_data_token(dataset, ids.tolist(), params['elev_idx'],
         params['freq_indices_sorted'], params['pol_idx'], cancel_check=cancel)
@@ -138,6 +139,8 @@ def form_band(params, indices, plan, resident_bytes=0):
     psf = np.zeros(len(x)+len(y), complex)
     gain, valid_count = 0., 0
     conjugate = core.plot_phase_conventions(dataset)[0] == '-jwt'
+    native_samples = (core.allocate_result((len(ids), len(freq)), np.complex128)
+                      if params.get('retain_complex') else None)
     for row, index in enumerate(ids):
         if cancel is not None and cancel():
             raise InterruptedError('ISAR computation superseded.')
@@ -146,6 +149,8 @@ def form_band(params, indices, plan, resident_bytes=0):
         samples = np.asarray(dataset.rcs_slice(np.ix_([index], [params['elev_idx']],
             params['freq_indices_sorted'], [params['pol_idx']])))[0, 0, :, 0]
         valid = np.isfinite(samples)
+        if native_samples is not None:
+            native_samples[row] = samples
         valid_count += int(valid.sum())
         weights = valid * wa[row] * wf
         gain += weights.sum()
@@ -171,8 +176,24 @@ def form_band(params, indices, plan, resident_bytes=0):
         plan['warnings'].append('Backprojection uses the selected native azimuth samples; the azimuth interpolation grid is not used.')
     magnitude = core.allocate_result(image.shape, np.float32)
     np.abs(image, out=magnitude)
+    inverse = None
+    if native_samples is not None:
+        from .masking import reconstruction_extra
+        inverse = dict(
+            kind='backprojection', native_samples=native_samples,
+            native_azimuth_degrees=az.copy(), native_frequency_hz=freq.copy(),
+            look_center_degrees=center, elevation_degrees=params.get('elevation_deg', 0.),
+            distance_scale_per_metre=scale, conjugate_time=conjugate,
+            azimuths=np.asarray(dataset.azimuths)[ids].copy(),
+            frequencies=np.asarray(dataset.frequencies)[params['freq_indices_sorted']].copy(),
+            elevations=np.asarray(dataset.elevations)[[params['elev_idx']]].copy(),
+            polarizations=[str(dataset.polarizations[params['pol_idx']])],
+            units=dict(dataset.units or {}), extra=reconstruction_extra(dataset),
+            history=str(dataset.history or ''), window=params['window_name'],
+        )
     return dict(az_values=az, x_range=x*scale, y_range=y*scale, magnitude=magnitude,
         **({'complex_image': image} if params.get('retain_complex') else {}),
+        **({'mask_inverse': inverse} if inverse is not None else {}),
         image_contract=contract, phase_coverage=valid_count/(len(ids)*len(freq)),
         source_selection_digest=digest.hex(), accurate_pfa=False,
         sampling=dict(cross_resolution=float(resolution[0]*scale), range_resolution=float(resolution[1]*scale),

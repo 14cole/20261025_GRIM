@@ -143,9 +143,7 @@ PLOT_OPS_SPECS = {
             ("Phase", "phase"),
         ),
         (
-            ("CDF", "cdf"),
             ("Sector Stats", "sector_stats"),
-            ("Range–Freq", "range_freq"),
             ("Markers", "markers"),
             ("Slider", "slider"),
             ("Overlays", "overlays"),
@@ -154,7 +152,6 @@ PLOT_OPS_SPECS = {
             ("Measure", "measure"),
             ("Phase Analysis", "phase_analysis"),
             ("Polarization", "polarization"),
-            ("Images A/B…", "image_compare"),
             ("Mask Cut", "mask_cut"),
         ),
     ),
@@ -180,7 +177,6 @@ PLOT_OPS_SPECS = {
             ("Measure", "measure"),
             ("Phase Analysis", "phase_analysis"),
             ("Polarization", "polarization"),
-            ("Images A/B…", "image_compare"),
             ("Mask Cut", "mask_cut"),
         ),
     ),
@@ -190,14 +186,17 @@ PLOT_OPS_SPECS = {
 # controls remain available above all three pages.
 PLOTTING_CONTROL_GROUPS = (
     ("Plots", (
-        ("azimuth_rect", "azimuth_polar", "frequency", "elevation_sweep", "waterfall", "cdf"),
-        ("compare", "delta_map", "sector_stats", "range_freq", "pbp", "phase"),
+        ("azimuth_rect", "azimuth_polar", "frequency", "elevation_sweep", "waterfall"),
+        ("compare", "delta_map", "sector_stats"),
+        ("phase_analysis", "polarization"),
     )),
-    ("ISAR", (("isar_image", "isar_composite", "az_vs_range"),)),
+    ("ISAR", (
+        ("isar_image", "isar_composite", "az_vs_range"),
+        ("mask_cut", "overlays", "measure"),
+    )),
     ("Plot Manipulation", (
         ("fit_x", "fit_y", "fit_both", "zoom_box", "pan"),
-        ("markers", "slider", "overlays", "measure"),
-        ("phase_analysis", "polarization", "image_compare", "mask_cut"),
+        ("markers", "slider"),
     )),
 )
 
@@ -402,7 +401,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
         self.application_palette = dict(APPLICATION_PALETTES[saved_palette])
         self._application_palette_actions: dict[str, QAction] = {}
 
-        self.setWindowTitle("GRIM Cut")
+        self.setWindowTitle("GRIM")
         screen = self.screen()
         if screen is not None:
             self.resize(initial_window_size(screen.availableGeometry().size()))
@@ -785,7 +784,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
 
         python_hint = QLabel(
             "Successful dataset operations and supported rectangular/polar azimuth, "
-            "frequency, elevation-sweep, CDF, and waterfall plots appear here. PBP and other plot "
+            "frequency, elevation-sweep, and waterfall plots appear here. PBP and other plot "
             "modes are noted but not emitted as runnable code. Tab changes, zoom, "
             "pan, and selection gestures are not recorded."
         )
@@ -966,6 +965,9 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
             if "overlays" in controls:
                 panel = self._plot_contexts[tab_key].spatial_overlays
                 panel.toggle_button = controls["overlays"]
+                controls["overlays"].toggled.connect(
+                    lambda checked: self._stop_mask_cut() if checked else None
+                )
                 controls["overlays"].toggled.connect(panel.setVisible)
             if "clear" in controls:
                 controls["clear"].clicked.connect(self._clear_plot)
@@ -1344,6 +1346,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
             dialog.deleteLater()
 
     def _show_engineering_tool(self, tab=None):
+        self._stop_mask_cut()
         from GRIM_Backend.ui.inline_engineering_analysis import InlineEngineeringAnalysis
         panel = self.inline_analysis
         if panel is None:
@@ -1357,7 +1360,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
 
     def _show_mask_cut(self, _checked=False) -> None:
         from GRIM_Backend.ui.mask_cut import open_mask_cut
-        self._mask_cut_dialog = open_mask_cut(self)
+        return open_mask_cut(self)
 
     def _show_image_comparison(self, _checked=False) -> None:
         from GRIM_Backend.ui.image_comparison import open_image_comparison
@@ -1770,7 +1773,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
                 "polarization": "Plot channel strengths, co-/cross-channel ratios, reciprocity, and channel phase differences on this canvas.",
                 "isar_image": "Form a coherent ISAR image of the selected aperture.",
                 "isar_composite": "Combine sublook magnitudes into a composite image.",
-                "mask_cut": "Keep or remove a drawn region from ISAR/Composite and create a new dataset.",
+                "mask_cut": "Draw a polygon on the current coherent ISAR image and add Include or Exclude cuts to the dataset table.",
                 "image_compare": "Compare captured images with locked coordinates and scales, linked cursors, blink/swipe, signed differences, and region statistics.",
                 "sector_stats": (
                     "Mean, median, max, min, or a percentile of linear power inside "
@@ -1930,6 +1933,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
         previous = self._plot_contexts.get(self._active_plot_tab)
         if previous is not None:
             if tab_key != self._active_plot_tab:
+                self._stop_mask_cut()
                 if previous.inline_analysis is not None:
                     previous.inline_analysis.stop_region_selection()
                 previous.spatial_overlays.hide()
@@ -2098,6 +2102,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
                 self.status.showMessage(str(exc))
         tab_key = self._tab_key_for_index.get(index)
         if tab_key is None:
+            self._stop_mask_cut()
             active = self._plot_contexts.get(self._active_plot_tab)
             if active is not None:
                 active.session.cancel()
@@ -2571,7 +2576,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
         super().closeEvent(event)
         if event.isAccepted():
             self._dispose_native_plot_snapshots()
-            for name in ("_engineering_analysis_dialog", "_image_comparison_dialog", "_mask_cut_dialog"):
+            for name in ("_engineering_analysis_dialog", "_image_comparison_dialog"):
                 dialog = getattr(self, name, None)
                 if dialog is not None:
                     dialog.close()

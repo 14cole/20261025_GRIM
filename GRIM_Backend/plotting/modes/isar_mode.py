@@ -747,7 +747,7 @@ def _estimate_band_working_set_bytes(
     preprocess_peak = 64 * source_cells
     retained_output = (12 if retain_complex else 4) * image_cells
     if retain_complex:
-        retained_output += source_cells  # Mask Cut native validity map.
+        retained_output += 17 * source_cells  # Native complex128 samples and validity.
     if reconstruction in {"fft", "fast", "accurate"}:
         formation_peak = 32 * source_cells + 40 * image_cells
     else:
@@ -1832,12 +1832,14 @@ def _compute_band(
         gain = float(sum(np.sum(weights[row] * wa[row] * wf, dtype=np.float64)
                          for row in range(len(theta))))
         native_valid = allocate_result((len(sorted_band_indices), len(freq_indices_sorted)), bool)
+        native_samples = allocate_result(native_valid.shape, np.complex128)
         ids, fids = np.asarray(sorted_band_indices), np.asarray(freq_indices_sorted)
         for block in result_blocks(native_valid.shape):
             if _cancel_requested(cancel_check):
                 return "ISAR computation superseded."
-            native_valid[block] = np.isfinite(dataset.rcs_slice(
-                np.ix_(ids[block[0]], [elev_idx], fids[block[1]], [pol_idx]))[:, 0, :, 0])
+            native_samples[block] = dataset.rcs_slice(
+                np.ix_(ids[block[0]], [elev_idx], fids[block[1]], [pol_idx]))[:, 0, :, 0]
+            native_valid[block] = np.isfinite(native_samples[block])
         from GRIM_Backend.isar.masking import reconstruction_extra
         inverse_context = {
             "full_x": np.asarray(x_range).copy(), "full_y": np.asarray(y_range).copy(),
@@ -1851,7 +1853,9 @@ def _compute_band(
             "frequencies": np.asarray(dataset.frequencies)[fids].copy(),
             "elevations": np.asarray(dataset.elevations)[[elev_idx]].copy(),
             "polarizations": [str(dataset.polarizations[pol_idx])],
-            "native_valid": native_valid, "units": dict(dataset.units or {}),
+            "native_valid": native_valid, "native_samples": native_samples,
+            "distance_scale_per_metre": unit_scale, "elevation_degrees": elevation_deg,
+            "units": dict(dataset.units or {}),
             "extra": reconstruction_extra(dataset),
             "history": str(dataset.history or ""), "window": window_name,
         }
@@ -2284,6 +2288,27 @@ def _compute_band_composite(
     return result
 
 
+def compute_selection(params: dict):
+    """Compute a captured multi-panel selection sequentially under one job."""
+    requests = params.get('panel_requests')
+    if requests is None:
+        return compute_bands(params)
+    results, elapsed = [], 0.
+    for request in requests:
+        check = params.get('cancel_check')
+        if check is not None and check():
+            return 'ISAR computation superseded.'
+        captured = dict(request, cancel_check=check, progress=params.get('progress'))
+        computed = compute_bands(captured)
+        if isinstance(computed, str):
+            return computed
+        bands, duration = computed
+        for index, band in enumerate(bands):
+            results.append(dict(band, _panel_params=request, _panel_band_index=index))
+        elapsed += duration
+    return results, elapsed
+
+
 def compute_bands(params: dict):
     """Capture one memory policy and bounded staging allocation per worker."""
     limit = resolve_memory_limit(params.get("memory_limit_bytes"))
@@ -2521,8 +2546,8 @@ def form_isar(
     frame at 0° unless a center is supplied, count a closing endpoint once, and
     use uniform angular weighting (the frequency window still applies).
     Backprojection uses native selected angles, ignoring azimuth resampling.
-    Its complex image supports export and spatial masks, but not Fourier
-    Mask Cut radar reconstruction. ``scene_half_extent_m=(x,y)`` specifies the
+    Its complex image supports export and spatial masks with approximate
+    native-polar radar reconstruction. ``scene_half_extent_m=(x,y)`` specifies the
     occupied horizontal scene for planning and crops the retained image.
     Native sampling diagnostics use acquired samples before interpolation.
     Support PSF cuts and a complex phase/frame contract accompany results.

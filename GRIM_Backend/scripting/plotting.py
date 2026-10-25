@@ -137,6 +137,7 @@ def plot_datasets(
     reference_index: int = 0,
     waterfall_style: str = "Surface",
     isar_options: dict[str, object] | None = None,
+    isar_panels: Sequence[dict[str, object]] | None = None,
     show_colorbar: bool = True,
     shared_colorbar: bool = True,
     square_aspect: bool = True,
@@ -178,6 +179,8 @@ def plot_datasets(
     cuts share their response X axis, independently of colorbar sharing.
     ``waterfall_style`` is retained for compatibility with existing scripts;
     Waterfall uses the physical two-axis image for every style value.
+    ``isar_panels`` replays captured ISAR/Composite panels; each recipe names
+    a ``dataset_index``, native axis selections, polarization, and ``isar_options``.
     """
 
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -193,7 +196,7 @@ def plot_datasets(
             f"Unsupported headless plot mode {mode!r}; supported modes are "
             + ", ".join(sorted(HEADLESS_PLOT_MODES))
         )
-    if mode_key in ("isar_image", "isar_composite") and len(selected) != 1:
+    if mode_key in ("isar_image", "isar_composite") and len(selected) != 1 and isar_panels is None:
         raise ValueError("ISAR headless plotting requires exactly one dataset")
     polarizations = tuple(dict.fromkeys(
         [polarization] if isinstance(polarization, str) else polarization
@@ -601,31 +604,47 @@ def plot_datasets(
         from GRIM_Backend.isar.geometry import image_extent, draw_image, image_axis_labels
         from GRIM_Backend.isar.quality import reconstruction_advisories
 
-        dataset = selected[0][1]
-        options = dict(isar_options or {})
-        options["aperture_mode"] = "composite" if mode_key == "isar_composite" else "coherent"
-        options.setdefault("length_unit", "in")
-
-
-        options["decimate_display"] = True
-        options["retain_complex"] = False
-        az_idx = _indices(dataset.azimuths, az_values)
-        fr_idx = _indices(dataset.frequencies, freq_values)
-        el_idx = _indices(dataset.elevations, [el_values[0]])[0]
-        pol_idx = _indices(dataset.polarizations, [polarization], text=True)[0]
-        bands, _elapsed = form_isar(
-            dataset,
-            azimuth_indices=az_idx,
-            frequency_indices=fr_idx,
-            elevation_index=el_idx,
-            polarization_index=pol_idx,
-            **options,
-        )
-        compatible_count = 1
+        recipes = list(isar_panels) if isar_panels is not None else [dict(
+            dataset_index=0, azimuths=az_values, frequencies=freq_values,
+            elevations=el_values[:1], polarization=polarization, isar_options=isar_options)]
+        if not recipes or len(recipes) > plot_common.MAX_WATERFALL_PANELS:
+            raise ValueError("ISAR selection must contain between 1 and 24 panels")
+        bands, identities = [], []
+        cells = 0
+        for recipe in recipes:
+            dataset_index = int(recipe['dataset_index'])
+            if not 0 <= dataset_index < len(selected):
+                raise ValueError("ISAR panel dataset_index must identify a selected dataset")
+            name, dataset = selected[dataset_index]
+            options = dict(recipe.get('isar_options') or {})
+            options['aperture_mode'] = 'composite' if mode_key == 'isar_composite' else 'coherent'
+            options.setdefault('length_unit', 'in')
+            options.update(decimate_display=True, retain_complex=False)
+            az_idx = _indices(dataset.azimuths, recipe['azimuths'])
+            fr_idx = _indices(dataset.frequencies, recipe['frequencies'])
+            el_idx = _indices(dataset.elevations, recipe['elevations'])[0]
+            pol_idx = _indices(dataset.polarizations, [recipe['polarization']], text=True)[0]
+            formed, _elapsed = form_isar(dataset, azimuth_indices=az_idx,
+                frequency_indices=fr_idx, elevation_index=el_idx, polarization_index=pol_idx, **options)
+            elevation_deg = float(plot_common.convert_axis_values(
+                [dataset.elevations[el_idx]], 'elevation', plot_common.axis_unit(dataset, 'elevation'), 'deg')[0])
+            unit_name, _unit_scale = _length_unit(options['length_unit'])
+            identity = (name, dataset, pol_idx, elevation_deg, unit_name)
+            bands.extend(formed)
+            identities.extend([identity] * len(formed))
+            cells += sum(band['magnitude'].size for band in formed)
+            if len(bands) > plot_common.MAX_WATERFALL_PANELS:
+                raise ValueError("ISAR selection creates more than 24 panels")
+            plot_common.validate_aggregate_image_cells(cells, panel_count=len(bands), operation='ISAR selection')
+        compatible_count = len(recipes)
         figure.clear()
         # Match the GUI's centered fixed-aspect image/colorbar group.
         figure.set_layout_engine("compressed" if square_aspect else "constrained")
-        axes_values = figure.subplots(1, len(bands), squeeze=False)[0]
+        columns = min(3, int(np.ceil(np.sqrt(len(bands)))))
+        slots = figure.subplots(int(np.ceil(len(bands) / columns)), columns, squeeze=False).ravel()
+        axes_values = list(slots[:len(bands)])
+        for extra in slots[len(bands):]:
+            extra.remove()
         style_axes = list(axes_values)
         displays = []
         for band in bands:
@@ -690,6 +709,8 @@ def plot_datasets(
         resolved = {band.get('resolved_reconstruction', reconstruction) for band in bands}
         if len(resolved) > 1:
             reconstruction_label = "PFA method selected per aperture"
+        elif 'backprojection' in resolved:
+            reconstruction_label = 'Coherent backprojection'
         elif 'accurate' in resolved or reconstruction in {"accurate", "cartesian", "pfa-accurate"}:
             reconstruction_label = "Cartesian PFA"
         else:
@@ -709,17 +730,22 @@ def plot_datasets(
             f"{image_name} Image | {elevation_name} {elevation_deg:g} deg | "
             f"Pol {dataset.polarizations[pol_idx]} | {reconstruction_label}"
         )
-        if len(bands) > 1:
+        if len(bands) > 1 or isar_panels is not None:
+            if isar_panels is not None:
+                title = f"{image_name} | {len(bands)} panels | {reconstruction_label}"
             figure.suptitle(title)
-            for axis, band in zip(axes_values, bands):
-                axis.set_title(
-                    f"{float(band['az_values'][0]):g}°–"
-                    f"{float(band['az_values'][-1]):g}°"
-                )
+            for axis, band, identity in zip(axes_values, bands, identities):
+                name, dataset, pol_idx, elevation_deg, unit_name = identity
+                label = f"{float(band['az_values'][0]):g}°–{float(band['az_values'][-1]):g}°"
+                if isar_panels is not None:
+                    label = (f"{name} | {dataset.polarizations[pol_idx]} | "
+                             f"{plot_common.angular_axis_name(dataset, 'elevation')} {elevation_deg:g}°\n" + label)
+                axis.set_title(label)
         else:
             axes_values[0].set_title(title)
 
-        for axis, band in zip(axes_values, bands):
+        for axis, band, identity in zip(axes_values, bands, identities):
+            _, _, _, elevation_deg, unit_name = identity
             x_label, y_label = image_axis_labels(
                 band, unit_name, elevation_deg, explicit_frame=len(bands) > 1
             )

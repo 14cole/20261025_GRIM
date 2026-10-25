@@ -299,8 +299,26 @@ class SpatialOverlayPanel(QDialog):
         if not filename:
             return
         try:
+            from GRIM_Backend.isar.mask_geometry import PREFIX, load_mask
+            from GRIM_Backend.isar.masking import MaskImage
+            with open(filename, encoding='utf-8-sig') as stream:
+                native_mask = stream.readline(64).startswith(PREFIX)
+            if native_mask:
+                ax = self._axis()
+                source = next((getattr(artist, '_grim_mask_source', None)
+                    for artist in (*ax.images, *ax.collections)
+                    if isinstance(getattr(artist, '_grim_mask_source', None), MaskImage)), None)
+                if source is None:
+                    raise ValueError('Plot a static ISAR image to load a saved mask in its physical coordinate frame.')
+                points, _ = load_mask(filename, source)
+                points = np.vstack((points, points[0]))
+                self.stop_interaction()
+                self.add_points(points, name=Path(filename).stem, plane='XY',
+                                length_unit=axis_info(ax, 'x')[1], ax=ax)
+                self.owner.status.showMessage('Loaded mask overlay with its saved physical frame and units.')
+                return
             points = read_overlay_points(filename)
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
             QMessageBox.warning(self, "Cannot load overlay", str(exc))
             return
         dialog = QDialog(self)

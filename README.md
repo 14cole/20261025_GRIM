@@ -45,3 +45,32 @@ retained with their runtime code.
 The runtime includes the box-selection correction: increasing azimuth bounds
 retain literal endpoints, so 90–360 does not include 0 and 0–30 does not include
 360. A stop below the start still selects a range across the angular seam.
+
+## Reusable ISAR masks
+
+Plot a dataset in ISAR, open **Mask Cut**, and draw a polygon or rectangle on
+the image. **Save Mask** writes an overlay-compatible XY CSV with a versioned
+header recording the physical frame, meters, boundary rule, Include/Exclude,
+and a coordinate checksum. **Load Mask** restores the boundary and operation;
+the same file can also be opened with **Overlays**. Plain XY overlay files can
+be imported as masks after choosing their units; their coordinates use the
+current plot frame.
+
+Saved masks follow the same physical target region across display units,
+axis flips, and look-center rotations. Datasets must share the same target
+origin and coordinate convention. Different image grids can select different
+pixel centers, so use matching formation settings for repeatable comparisons.
+
+**Finish Cut** adds and selects the `_include` or `_exclude` dataset and plots
+it in ISAR. **Create comparison set** adds and selects both. Reconstruction
+fits complex spatial coefficients to the original native samples, checks the
+fit with an independent direct forward calculation, and refuses partial cuts
+with relative complex fit error above 0.1%. Include projects the selected
+coefficients; Exclude is the original data minus Include and retains the fit
+residual. A mask covering the complete scene preserves the original samples
+exactly. Missing samples remain unknown. The mask definition and fit diagnostics
+are recorded in the derived dataset's metadata.
+
+This fit check measures agreement with the input data; it does not establish
+unique scattering attribution or calibrated component RCS. Scene size,
+sampling, phase stability, and the far-field monostatic model still matter.

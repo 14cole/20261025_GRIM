@@ -34,25 +34,85 @@ def _spin_band_bounds(lo_spin, hi_spin, lo: float, hi: float) -> tuple[float, fl
 
 
 def render(self, *, composite=False) -> None:
-    """GUI-thread half: validate the selections, capture everything the worker
-    needs into a params dict, and hand off to the mixin's async submit. The
-    finished computation comes back through `display_results`."""
+    """Capture all selected dataset/elevation/polarization panels as one job."""
     self.last_plot_mode = "isar_composite" if composite else "isar_image"
     self._start_plot_render()
-    if self.active_dataset is None:
+    datasets = self._selected_datasets()
+    if not datasets:
         self.status.showMessage("Select a dataset before plotting.")
         return
-    if self._preflight_plot_datasets([("Dataset", self.active_dataset)]) is None:
+    reference = self._preflight_plot_datasets(datasets)
+    if reference is None:
+        return
+    selected = {
+        "azimuth": reference.azimuths[sorted(self._selected_indices(self.list_az))],
+        "frequency": reference.frequencies[sorted(self._selected_indices(self.list_freq))],
+        "elevation": self._selected_values(self.list_elev),
+    }
+    pol_values = self._selected_values(self.list_pol)
+    if any(not len(values) for values in selected.values()) or not len(pol_values):
+        self.status.showMessage("Select azimuths, frequencies, elevations, and polarizations to plot.")
         return
     advanced = getattr(self, "isar_advanced", None)
     if advanced is not None:
         advanced.set_plot_mode(self.last_plot_mode)
-    options = advanced.options() if advanced is not None else {}
+    options = dict(advanced.options()) if advanced is not None else {}
     options["aperture_mode"] = "composite" if composite else "coherent"
-    # Freeze the automatic system-aware budget now; every band and replay
-    # uses the same captured choice rather than a moving available-RAM value.
     options["memory_limit_bytes"] = computation.resolve_memory_limit(
         options.get("memory_limit_bytes"), use_environment=False)
+    requests, skipped = [], []
+    cells, retained, peak, count = 0, 0, 0, 0
+    for name, dataset in datasets:
+        indices = {axis: self._axis_selection_for_dataset(reference, dataset, axis, values)
+                   for axis, values in selected.items()}
+        if any(ids is None for ids in indices.values()):
+            skipped.append(name)
+            continue
+        for pol in pol_values:
+            pol_ids = self._indices_for_values(dataset.polarizations, [pol], tol=0.)
+            if pol_ids is None:
+                skipped.append(f"{name}/{pol}")
+                continue
+            for elev in indices["elevation"]:
+                selection = dict(indices, elevation=int(elev), polarization=int(pol_ids[0]))
+                request = _prepare(self, dataset, selection, reference, options, composite=composite)
+                if request is None:
+                    self.status.showMessage(f"{name}: {self.status.currentMessage()}")
+                    return
+                request['source_dataset_name'] = name
+                requests.append(request)
+                count += len(request['bands'])
+                if count > common.MAX_WATERFALL_PANELS:
+                    self.status.showMessage(f"ISAR blocked: selection creates more than {common.MAX_WATERFALL_PANELS} panels; select fewer datasets, elevations, or polarizations.")
+                    return
+                cells += request['_display_cells']
+                peak = max(peak, retained + request['_estimated_peak'])
+                retained += request['_estimated_retained']
+                try:
+                    common.validate_aggregate_image_cells(cells, panel_count=count, operation="ISAR selection")
+                    with computation.compute_memory_policy(request['memory_limit_bytes'],
+                            allow_exceed=request.get('memory_allow_exceed', False)):
+                        computation._validate_isar_working_set(peak, operation="ISAR selection")
+                except ValueError as exc:
+                    self.status.showMessage(f"ISAR blocked: {exc}")
+                    return
+    if not requests:
+        self.status.showMessage("No compatible selected data for ISAR. " + ", ".join(skipped))
+        return
+    params = dict(requests[0])
+    if len(requests) > 1 or len(datasets) > 1:
+        params['panel_requests'] = requests
+        params['dataset'] = self.active_dataset
+    params['selected_dataset_tokens'] = tuple(id(dataset) for _, dataset in datasets)
+    params['skipped_datasets'] = skipped
+    self._isar_submit(params)
+
+
+def _prepare(self, dataset, selection, reference, options, *, composite=False) -> dict | None:
+    """Validate and capture one dataset/elevation/polarization recipe."""
+    if dataset is None:
+        self.status.showMessage("Select a dataset before plotting.")
+        return
     image_mode = options.get("aperture_mode", "auto")
     composite_side = int(options.get("composite_side", computation._COMPOSITE_GRID_SIDE))
     use_composite = lambda span: image_mode == "composite" or (image_mode == "auto" and span > computation._COMPOSITE_SPAN_DEG)
@@ -67,7 +127,7 @@ def render(self, *, composite=False) -> None:
     metadata_notes: list[str] = []
     try:
         preflight_error = computation._isar_preflight_error(
-            self.active_dataset,
+            dataset,
             flip_x=flip_x,
             flip_y=flip_y,
             undeclared_out=contract_assumptions,
@@ -80,7 +140,7 @@ def render(self, *, composite=False) -> None:
         self.status.showMessage(f"ISAR blocked: {preflight_error}.")
         return
 
-    az_indices = sorted(self._selected_indices(self.list_az))
+    az_indices = sorted(selection["azimuth"])
     if not az_indices:
         self.status.showMessage("Select one or more azimuths/aspects to plot.")
         return
@@ -96,9 +156,9 @@ def render(self, *, composite=False) -> None:
             self.status.showMessage("ISAR aperture: center/width must be finite and width positive.")
             return
         az_arr = computation._angle_values_to_degrees(
-            self.active_dataset,
+            dataset,
             "azimuth",
-            np.asarray(self.active_dataset.azimuths, dtype=float)[az_indices],
+            np.asarray(dataset.azimuths, dtype=float)[az_indices],
         )
         dist = np.abs(np.mod(az_arr - ap_center + 180.0, 360.0) - 180.0)
         keep = dist <= ap_width / 2.0 + 1e-9
@@ -111,7 +171,7 @@ def render(self, *, composite=False) -> None:
             )
             return
 
-    freq_indices = sorted(self._selected_indices(self.list_freq))
+    freq_indices = sorted(selection["frequency"])
     if not freq_indices:
         self.status.showMessage("Select one or more frequencies to plot.")
         return
@@ -126,8 +186,10 @@ def render(self, *, composite=False) -> None:
         if f_hi <= f_lo:
             self.status.showMessage("ISAR freq band: max must exceed min.")
             return
-        fvals = self.active_dataset.frequencies
+        fvals = dataset.frequencies
         band_lo, band_hi = _spin_band_bounds(self.spin_isar_freq_min, self.spin_isar_freq_max, f_lo, f_hi)
+        (band_lo, band_hi), _ = common.selection_for_dataset(
+            reference, dataset, 'frequency', [band_lo, band_hi])
         freq_indices = [i for i in freq_indices if band_lo <= float(fvals[i]) <= band_hi]
         if len(freq_indices) < 2:
             self.status.showMessage(
@@ -139,17 +201,13 @@ def render(self, *, composite=False) -> None:
         self.status.showMessage("Select at least 2 frequency samples for ISAR imaging.")
         return
 
-    pol_idx = self._single_selection_index(self.list_pol, "polarization")
-    if pol_idx is None:
-        return
-    elev_idx = self._single_selection_index(self.list_elev, "elevation")
-    if elev_idx is None:
-        return
+    pol_idx = selection["polarization"]
+    elev_idx = selection["elevation"]
     elevation_deg = float(
         computation._angle_values_to_degrees(
-            self.active_dataset,
+            dataset,
             "elevation",
-            [self.active_dataset.elevations[elev_idx]],
+            [dataset.elevations[elev_idx]],
         )[0]
     )
     if abs(float(np.cos(np.deg2rad(elevation_deg)))) < 1.0e-6:
@@ -173,7 +231,7 @@ def render(self, *, composite=False) -> None:
                 frequency_count=len(freq_indices),
             )
             az_target_deg = computation._validated_azimuth_target(
-                self.active_dataset,
+                dataset,
                 az_indices,
                 az_target_deg,
                 aperture_center_degrees=az_center_deg,
@@ -192,7 +250,7 @@ def render(self, *, composite=False) -> None:
     else:
         try:
             bands = angular_bands(az_indices, computation._angle_values_to_degrees(
-                self.active_dataset, "azimuth", self.active_dataset.azimuths))
+                dataset, "azimuth", dataset.azimuths))
         except ValueError as exc:
             self.status.showMessage(f"ISAR selection: {exc}")
             return
@@ -209,7 +267,7 @@ def render(self, *, composite=False) -> None:
         )
         return
 
-    freq_values_full = self.active_dataset.frequencies[freq_indices]
+    freq_values_full = dataset.frequencies[freq_indices]
     freq_order = np.argsort(freq_values_full)
     freq_indices_sorted = [freq_indices[i] for i in freq_order]
     freq_values = freq_values_full[freq_order].astype(float)
@@ -219,7 +277,7 @@ def render(self, *, composite=False) -> None:
         )
         return
 
-    freq_unit = str((self.active_dataset.units or {}).get("frequency", ""))
+    freq_unit = str((dataset.units or {}).get("frequency", ""))
     freq_hz = freq_values * computation._unit_to_hz_scale(freq_unit)
     df = float(np.mean(np.diff(freq_hz)))
     if df <= 0.0:
@@ -249,9 +307,9 @@ def render(self, *, composite=False) -> None:
     total_display_cells = 0
     for band in bands:
         band_degrees = computation._angle_values_to_degrees(
-            self.active_dataset,
+            dataset,
             "azimuth",
-            np.asarray(self.active_dataset.azimuths, dtype=float)[band],
+            np.asarray(dataset.azimuths, dtype=float)[band],
         )
         if az_center_deg is not None:
             band_degrees = computation._unwrap_degrees(band_degrees, az_center_deg)
@@ -282,6 +340,10 @@ def render(self, *, composite=False) -> None:
             output_shape = (len(axes[0]), len(axes[1]))
             working = working_set_bytes(axes, len(freq_hz))
             retained = (12 if retain_complex else 4) * output_shape[0] * output_shape[1]
+            if retain_complex:
+                native_bytes = 16 * len(band) * len(freq_hz)
+                retained += native_bytes
+                working += native_bytes
         else:
             az_count = int(az_target_deg.size) if az_target_deg is not None else len(band)
             working = computation._estimate_band_working_set_bytes(
@@ -299,7 +361,7 @@ def render(self, *, composite=False) -> None:
             # Reduced overviews keep two native peak-index grids as well as
             # magnitude; these remain bounded by the display cell budget.
             retained = ((12 if retain_complex else 4) * n_az_fft * n_freq_fft
-                        + (len(band) * len(freq_indices_sorted) if retain_complex else 0))
+                        + (17 * len(band) * len(freq_indices_sorted) if retain_complex else 0))
             if reduced:
                 retained += 12 * common.bounded_image_cell_count(n_az_fft, n_freq_fft)
         total_display_cells += common.bounded_image_cell_count(*output_shape)
@@ -319,7 +381,7 @@ def render(self, *, composite=False) -> None:
 
     params = {
         **options,
-        "dataset": self.active_dataset,
+        "dataset": dataset,
         "retain_complex": retain_complex,
         "retain_mask_source": not preview_only,
         "plot_mode": self.last_plot_mode,
@@ -350,7 +412,7 @@ def render(self, *, composite=False) -> None:
     # selections resolve to backprojection in the shared planner.
     try:
         for band in bands:
-            az = computation._angle_values_to_degrees(self.active_dataset, "azimuth", self.active_dataset.azimuths[band])
+            az = computation._angle_values_to_degrees(dataset, "azimuth", dataset.azimuths[band])
             if az_center_deg is not None:
                 az = computation._unwrap_degrees(az, az_center_deg)
             computation.plan_isar(az, freq_hz, elevation_degrees=elevation_deg,
@@ -358,12 +420,24 @@ def render(self, *, composite=False) -> None:
     except ValueError as exc:
         self.status.showMessage(f"ISAR planning: {exc}")
         return
-    self._isar_submit(params)
+    reference_for_dataset = getattr(self, "_python_reference_for_dataset", None)
+    reference = reference_for_dataset(dataset) if callable(reference_for_dataset) else None
+    if reference is not None:
+        params["source_dataset_id"] = reference.dataset_id
+        params["source_dataset_name"] = reference.name
+    params["_estimated_peak"] = estimated_peak
+    params["_estimated_retained"] = estimated_resident
+    params["_display_cells"] = total_display_cells
+    return params
 
 def display_results(self, params: dict, band_results: list, elapsed: float) -> None:
     """GUI-thread half two: draw the computed band images. Runs from the
     mixin's worker-finished slot; everything Qt/matplotlib happens here."""
-    dataset = params["dataset"]
+    stop_mask = getattr(self, "_stop_mask_cut", None)
+    if callable(stop_mask):
+        stop_mask()
+    dataset = band_results[0].get("_panel_params", params)["dataset"]
+    multi_selection = bool(params.get("panel_requests"))
     unit_name = params["unit_name"]
     az_target_deg = params["az_target_deg"]
 
@@ -402,13 +476,16 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         self.plot_axes = None
         active_axes = [self.plot_ax]
     else:
-        ax_array = self.plot_figure.subplots(1, n_bands)
-        if not isinstance(ax_array, np.ndarray):
-            ax_array = np.array([ax_array])
-        active_axes = list(ax_array.ravel())
+        columns = min(3, int(np.ceil(np.sqrt(n_bands))))
+        slots = self.plot_figure.subplots(int(np.ceil(n_bands / columns)), columns, squeeze=False).ravel()
+        active_axes = list(slots[:n_bands])
+        for extra in slots[n_bands:]:
+            extra.remove()
         self.plot_axes = active_axes
         self.plot_ax = active_axes[0]
-    self._style_plot_axes()
+    self.plot_figure.set_facecolor(self._current_plot_bg())
+    for ax in active_axes:
+        self._style_axes(ax)
 
     cmap = self._effective_colormap()
     zmin = self.spin_plot_zmin.value()
@@ -434,6 +511,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     overall_y_min = float("inf")
     overall_y_max = float("-inf")
     for band_index, (ax, br) in enumerate(zip(active_axes, band_results)):
+        panel_params = br.get("_panel_params", params)
+        panel_band_index = br.get("_panel_band_index", band_index)
         x_min, x_max, y_min, y_max = image_extent(br)
         # imshow on a uniform grid is several times faster than pcolormesh
         # for big arrays (1601-frequency datasets feel laggy with pcolormesh).
@@ -447,15 +526,15 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
             attach_block_peak_probe(mesh, br["display_x_edges"], br["display_y_edges"],
                 br["x_range"], br["y_range"], br["display_peak_x_indices"], br["display_peak_y_indices"])
         from GRIM_Backend.plotting.image_analysis import attach_isar_record
-        attach_isar_record(self, mesh, br, params)
+        attach_isar_record(self, mesh, br, panel_params)
         from GRIM_Backend.isar.masking import image_from_band, MaskImageRequest
-        if params.get("retain_mask_source", True):
-            mesh._grim_mask_source = image_from_band(br, params)
+        if panel_params.get("retain_mask_source", True):
+            mesh._grim_mask_source = image_from_band(br, panel_params)
         else:
             # Keep a numerical recipe, not the native images or Qt callbacks.
-            captured = {key: value for key, value in params.items()
+            captured = {key: value for key, value in panel_params.items()
                         if not key.startswith('_') and key not in ('figure_token', 'cancel_check', 'progress')}
-            captured['bands'] = [list(params['bands'][band_index])]
+            captured['bands'] = [list(panel_params['bands'][panel_band_index])]
             name = f"{'Composite' if br.get('composite') else 'ISAR'} {br['az_values'][0]:g}°–{br['az_values'][-1]:g}°"
             mesh._grim_mask_source = MaskImageRequest(name, captured, source_digest=br.get('source_selection_digest'))
         if square_aspect:
@@ -471,11 +550,14 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         overall_x_max = max(overall_x_max, x_max)
         overall_y_min = min(overall_y_min, y_min)
         overall_y_max = max(overall_y_max, y_max)
-        if n_bands > 1:
-            ax.set_title(
-                f"{float(br['az_values'][0]):g}°–{float(br['az_values'][-1]):g}°",
-                color=self._current_plot_text(),
-            )
+        if n_bands > 1 or multi_selection:
+            title = f"{float(br['az_values'][0]):g}°–{float(br['az_values'][-1]):g}°"
+            if multi_selection:
+                panel_dataset = panel_params['dataset']
+                title = (f"{panel_params.get('source_dataset_name', 'Dataset')} | "
+                         f"{panel_dataset.polarizations[panel_params['pol_idx']]} | "
+                         f"{common.angular_axis_name(panel_dataset, 'elevation')} {panel_params['elevation_deg']:g}°\n" + title)
+            ax.set_title(title, color=self._current_plot_text())
 
     elev_value = float(params["elevation_deg"])
     elev_name = common.angular_axis_name(dataset, "elevation")
@@ -499,14 +581,16 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     fig_title = (
         f"{image_name} | {elev_name} {elev_value:g} deg | Pol {pol_value}{recon_label}"
     )
-    if n_bands > 1:
+    if multi_selection:
+        fig_title = f"{image_name} | {n_bands} panels{recon_label}"
+    if n_bands > 1 or multi_selection:
         self.plot_figure.suptitle(fig_title, color=self._current_plot_text())
     else:
         active_axes[0].set_title(fig_title, color=self._current_plot_text())
 
     for ax, br in zip(active_axes, band_results):
         x_label, y_label = image_axis_labels(
-            br, unit_name, elev_value, explicit_frame=n_bands > 1
+            br, unit_name, br.get("_panel_params", params)["elevation_deg"], explicit_frame=n_bands > 1
         )
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
@@ -552,7 +636,7 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     # combination. Re-running this on every render — which the per-keystroke
     # `valueChanged` signal triggers — would clobber the user's typing
     # whenever zmin transiently exceeds zmax mid-keystroke.
-    state_key = (id(dataset), self._plot_scale_is_linear())
+    state_key = (tuple(id(r["dataset"]) for r in params.get("panel_requests", [params])), self._plot_scale_is_linear())
     last_state = getattr(self, "_isar_last_autofit_state", None)
     autofit_limits = None
     if state_key != last_state:
@@ -689,6 +773,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         self.status.setToolTip("\n".join(advisories))
     if advisories:
         parts.insert(0, "Accuracy notes: " + " | ".join(advisories) + " — ")
+    if params.get("skipped_datasets"):
+        notes.append("skipped incompatible selections: " + ", ".join(params["skipped_datasets"]))
     if notes:
         parts.append(" — " + ", ".join(notes))
     self._show_plot_status("".join(parts))

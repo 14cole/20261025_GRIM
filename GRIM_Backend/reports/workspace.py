@@ -859,7 +859,6 @@ if GUI_AVAILABLE:
             self.plot_type_combo.addItem("Azimuth — polar", "azimuth_polar")
             self.plot_type_combo.addItem("Elevation sweep", "elevation")
             self.plot_type_combo.addItem("Frequency sweep", "frequency")
-            self.plot_type_combo.addItem("CDF — across azimuth", "cdf")
             self.plot_type_combo.addItem("Exceedance — across azimuth", "exceedance")
             self.plot_type_combo.addItem("Azimuth sector statistics", "sector_stats")
             plot_form.addRow("Plot type", self.plot_type_combo)

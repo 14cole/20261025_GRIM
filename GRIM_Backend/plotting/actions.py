@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from uuid import uuid4
 
 import numpy as np
@@ -1005,7 +1006,13 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
         self.plot_axes = None
         self._style_plot_axes()
 
+    def _stop_mask_cut(self) -> None:
+        panel = getattr(self, "_mask_cut_panel", None)
+        if panel is not None:
+            panel.deactivate()
+
     def _clear_plot(self) -> None:
+        self._stop_mask_cut()
         from GRIM_Backend.plotting.modes.cdf_mode import clear_state
         clear_state(self.plot_figure)
         context = getattr(self, "_plot_contexts", {}).get(getattr(self, "_active_plot_tab", None))
@@ -1226,6 +1233,10 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
     # --- renderer preflight, unit conversion, and display bounding ----------
 
     def _start_plot_render(self) -> None:
+        self._stop_mask_cut()
+        update_controls = getattr(self, "_update_plot_display_controls", None)
+        if callable(update_controls):
+            update_controls()
         if not getattr(self, "_slider_dispatching", False):
             self._slider_frame_finished(False)
         self._schedule_plot_slider_refresh()
@@ -1330,6 +1341,7 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
 
     def _dispose_native_plot_snapshots(self):
         """Release both tabs' temporary resources after an accepted close."""
+        self._stop_mask_cut()
         for name in ("_autoplot_timer", "_hover_timer", "_plot_slider_refresh_timer"):
             timer = getattr(self, name, None)
             if timer is not None:
@@ -1756,6 +1768,8 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
             btn.blockSignals(False)
 
     def _on_zoom_box_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stop_mask_cut()
         panel = getattr(self, "inline_analysis", None)
         if checked and panel is not None:
             panel.stop_region_selection()
@@ -1774,6 +1788,8 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
         self.status.showMessage("Box zoom enabled. Drag left mouse on the plot to zoom.")
 
     def _on_pan_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stop_mask_cut()
         panel = getattr(self, "inline_analysis", None)
         if checked and panel is not None:
             panel.stop_region_selection()
@@ -1869,6 +1885,15 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
     def _on_plot_mouse_press(self, event) -> None:
         if getattr(event, "canvas", None) is not self.plot_canvas:
             return
+        mask = getattr(self, "_mask_cut_panel", None)
+        if mask is not None and mask.isVisible():
+            return  # Mask selectors own the canvas until the user closes them.
+        axes = getattr(event, "inaxes", None)
+        if axes is not None and any(
+            getattr(artist, "_grim_mask_source", None) is not None
+            for artist in (*axes.images, *axes.collections)
+        ):
+            self.plot_figure._grim_mask_active_axes = weakref.ref(axes)
         button = getattr(event, "button", None)
         pan_requested = button in (MouseButton.MIDDLE, 2) or (
             button is MouseButton.LEFT
@@ -2279,7 +2304,7 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
 
         def work(params=params, signals=signals):
             try:
-                result = isar_mode.compute_bands(params)
+                result = isar_mode.compute_selection(params)
             except Exception as exc:  # surface, don't kill the worker silently
                 result = f"ISAR computation failed: {exc}"
             signals.done.emit(params, result)
@@ -2300,6 +2325,8 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
             self.status.showMessage(result)
         elif (
             params.get("dataset") is not self.active_dataset
+            or (params.get("selected_dataset_tokens") is not None
+                and params["selected_dataset_tokens"] != tuple(id(ds) for _, ds in self._selected_datasets()))
             or params.get("figure_token") is not self.plot_figure
             or params.get("isar_input_revision")
             != getattr(self, "_isar_input_revision", 0)
@@ -2321,10 +2348,14 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
                 )
                 self._last_isar_figure_token = params.get("figure_token")
                 # Freeze the worker-captured recipe after successful publication.
+                recorded_datasets = []
+                for request in params.get('panel_requests', [params]):
+                    if not any(ds is request['dataset'] for _, ds in recorded_datasets):
+                        recorded_datasets.append((request.get('source_dataset_name', 'ISAR Dataset'), request['dataset']))
                 self._record_python_plot(
                     params.get("plot_mode", "isar_image"),
                     resolved=self._resolved_isar_python_plot(params),
-                    datasets_override=[("ISAR Dataset", params["dataset"])],
+                    datasets_override=recorded_datasets,
                     emit=bool(params.get("_record_python_request", False)),
                 )
             except Exception as exc:
@@ -3186,6 +3217,16 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
         needed for replay is instead taken from the worker's captured params.
         """
 
+        if params.get('panel_requests'):
+            requests = params['panel_requests']
+            dataset_ids, panels = [], []
+            for request in requests:
+                key = id(request['dataset'])
+                if key not in dataset_ids:
+                    dataset_ids.append(key)
+                panels.append(dict(PlotOpsMixin._resolved_isar_python_plot(request),
+                                   dataset_index=dataset_ids.index(key)))
+            return dict(PlotOpsMixin._resolved_isar_python_plot(requests[0]), isar_panels=panels)
         dataset = params["dataset"]
         azimuth_indices = sorted(
             {int(index) for band in params["bands"] for index in band}

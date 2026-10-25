@@ -91,7 +91,7 @@ class PlotWorkspaceMixin:
         legend = self._plot_contexts[key].chk_plot_legend
         groups.addCommonWidget(legend)
         legend.show()
-        for role in ('auto_plot', 'auto_scale', 'hold', 'clear'):
+        for role in ('auto_plot', 'auto_scale', 'hold', 'pbp', 'phase', 'clear'):
             button = button_for(role)
             groups.addCommonWidget(button)
             button.show()
@@ -101,6 +101,28 @@ class PlotWorkspaceMixin:
             button.show()
         groups.layout().invalidate()
         groups.updateGeometry()
+        self._update_plot_display_controls()
+
+    def _update_plot_display_controls(self):
+        controls = self._plot_controls_by_tab[self._active_plot_tab]
+        mode = self._plot_contexts[self._active_plot_tab].last_plot_mode
+        supported = {
+            'pbp': ('azimuth_rect', 'azimuth_polar', 'frequency'),
+            'phase': ('azimuth_rect', 'azimuth_polar', 'frequency',
+                      'elevation_sweep', 'waterfall', 'compare'),
+        }
+        for role, modes in supported.items():
+            button = controls.get(role)
+            if button is None:
+                continue  # ISAR uses the disabled shared-toolbar placeholders.
+            enabled = mode in modes
+            if not enabled and button.isChecked():
+                # Unsupported settings must not leak into the new renderer.
+                # Blocking signals avoids launching another plot mid-transition.
+                blocked = button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(blocked)
+            button.setEnabled(enabled)
 
     def _show_plot_workspace(self, key='plotting'):
         self.main_tabs.setCurrentWidget(self.tab_simple_plots)
