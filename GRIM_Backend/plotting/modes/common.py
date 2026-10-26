@@ -1046,10 +1046,13 @@ def finite_data_limits(arrays) -> tuple[float, float] | None:
     upper = float("-inf")
     for values in arrays:
         array = np.asarray(values)
-        finite = array[np.isfinite(array)]
-        if finite.size:
-            lower = min(lower, float(np.min(finite)))
-            upper = max(upper, float(np.max(finite)))
+        from GRIM_Backend.datasets.result_storage import result_blocks
+        for block in result_blocks(array.shape):
+            tile = array[block]
+            finite = tile[np.isfinite(tile)]
+            if finite.size:
+                lower = min(lower, float(np.min(finite)))
+                upper = max(upper, float(np.max(finite)))
     if not np.isfinite(lower) or not np.isfinite(upper):
         return None
     return lower, upper

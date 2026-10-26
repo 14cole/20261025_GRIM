@@ -89,7 +89,6 @@ def render(self, *, composite=False) -> None:
                 peak = max(peak, retained + request['_estimated_peak'])
                 retained += request['_estimated_retained']
                 try:
-                    common.validate_aggregate_image_cells(cells, panel_count=count, operation="ISAR selection")
                     with computation.compute_memory_policy(request['memory_limit_bytes'],
                             allow_exceed=request.get('memory_allow_exceed', False)):
                         computation._validate_isar_working_set(peak, operation="ISAR selection")
@@ -288,7 +287,7 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
     unit_name, unit_scale = computation._length_unit(units_combo.currentText() if units_combo else "in")
 
     recon_combo = getattr(self, "combo_isar_recon", None)
-    recon_text = recon_combo.currentText() if recon_combo is not None else "FFT"
+    recon_text = recon_combo.currentText() if recon_combo is not None else "Recommended"
     recon_lower = recon_text.lower()
     if recon_lower.startswith("recommended"):
         recon = "auto"
@@ -300,8 +299,7 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
         recon = "fft"
     # Byte-based worker preflight. Display-cell caps alone do not account for
     # the complex source slice or FFT temporaries.
-    preview_only = bool(getattr(self, "_slider_dispatching", False) or getattr(self, "_sweep_export", None))
-    retain_complex = not composite and not preview_only
+    retain_complex = False  # reconstruct the captured source only when Mask Cut is opened
     estimated_resident = 0
     estimated_peak = 0
     total_display_cells = 0
@@ -321,25 +319,34 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
                 self.status.showMessage(f"ISAR composite: {exc}")
                 return
             sublook_count = max(map(len, looks))
+            from GRIM_Backend.isar.source_frame import processing_params
+            processing = processing_params(dict(dataset=dataset, az_center_deg=az_center_deg))
+            grid_plan = computation._composite_geometry(processing['dataset'], band, freq_hz, unit_scale,
+                recon="accurate" if recon in {"auto", "backprojection"} else recon,
+                elevation_deg=elevation_deg, az_center_deg=processing.get('az_center_deg'),
+                composite_side=composite_side, scene_half_extent_m=options.get("scene_half_extent_m"))
+            if isinstance(grid_plan, str):
+                self.status.showMessage(grid_plan)
+                return
+            output_shape = grid_plan[-1]
+            retained = 12 * output_shape[0] * output_shape[1]  # magnitude, display, artist
             working = computation._estimate_band_working_set_bytes(
-                sublook_count,
-                len(freq_indices_sorted),
+                sublook_count, len(freq_indices_sorted),
                 reconstruction="accurate" if recon in {"auto", "backprojection"} else recon,
-                retain_complex=False,
-            ) + 68 * composite_side**2
-            retained = composite_side**2 * np.dtype(np.float32).itemsize
-            output_shape = (composite_side, composite_side)
+                retain_complex=False) + retained + computation.BATCH_BYTES
         elif recon == "backprojection" or band_span >= 90:
             from GRIM_Backend.isar.backprojection import geometry, working_set_bytes
             try:
-                axes = geometry(band_degrees, freq_hz, elevation_deg,
-                    options.get("scene_half_extent_m"), az_center_deg)[4]
+                with computation.compute_memory_policy(options["memory_limit_bytes"],
+                        allow_exceed=options.get("memory_allow_exceed", False)):
+                    axes = geometry(band_degrees, freq_hz, elevation_deg,
+                        options.get("scene_half_extent_m"), az_center_deg)[4]
             except ValueError as exc:
                 self.status.showMessage(f"ISAR planning: {exc}")
                 return
             output_shape = (len(axes[0]), len(axes[1]))
             working = working_set_bytes(axes, len(freq_hz))
-            retained = (12 if retain_complex else 4) * output_shape[0] * output_shape[1]
+            retained = (20 if retain_complex else 12) * output_shape[0] * output_shape[1]
             if retain_complex:
                 native_bytes = 16 * len(band) * len(freq_hz)
                 retained += native_bytes
@@ -352,23 +359,14 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
                 reconstruction="accurate" if recon == "auto" else recon,
                 retain_complex=retain_complex,
             )
-            n_az_fft = computation._next_fast_len(max(az_count, 256))
-            n_freq_fft = computation._next_fast_len(max(len(freq_indices_sorted), 256))
+            n_az_fft = computation._fft_size(az_count)
+            n_freq_fft = computation._fft_size(len(freq_indices_sorted))
             output_shape = (n_az_fft, n_freq_fft)
-            # Keep native magnitude and complex pixels for Mask Cut.
-            reduced = max(n_az_fft, n_freq_fft) > min(
-                common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
-            # Reduced overviews keep two native peak-index grids as well as
-            # magnitude; these remain bounded by the display cell budget.
-            retained = ((12 if retain_complex else 4) * n_az_fft * n_freq_fft
-                        + (17 * len(band) * len(freq_indices_sorted) if retain_complex else 0))
-            if reduced:
-                retained += 12 * common.bounded_image_cell_count(n_az_fft, n_freq_fft)
-        total_display_cells += common.bounded_image_cell_count(*output_shape)
+            retained = (20 if retain_complex else 12) * n_az_fft * n_freq_fft
+        total_display_cells += output_shape[0] * output_shape[1]
         estimated_peak = max(estimated_peak, estimated_resident + working)
         estimated_resident += retained
     try:
-        common.validate_aggregate_image_cells(total_display_cells, panel_count=len(bands), operation="ISAR image")
         with computation.compute_memory_policy(options["memory_limit_bytes"],
                 allow_exceed=options.get("memory_allow_exceed", False)):
             computation._validate_isar_working_set(
@@ -383,7 +381,8 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
         **options,
         "dataset": dataset,
         "retain_complex": retain_complex,
-        "retain_mask_source": not preview_only,
+        "retain_mask_source": False,
+        "decimate_display": False,
         "plot_mode": self.last_plot_mode,
         # Identity token: if the active figure changed while computing (user
         # switched tabs), the finished result is dropped instead of being
@@ -536,7 +535,9 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
                         if not key.startswith('_') and key not in ('figure_token', 'cancel_check', 'progress')}
             captured['bands'] = [list(panel_params['bands'][panel_band_index])]
             name = f"{'Composite' if br.get('composite') else 'ISAR'} {br['az_values'][0]:g}°–{br['az_values'][-1]:g}°"
-            mesh._grim_mask_source = MaskImageRequest(name, captured, source_digest=br.get('source_selection_digest'))
+            mesh._grim_mask_source = MaskImageRequest(name, captured,
+                source_digest=br.get('source_selection_digest'),
+                metadata=image_from_band(br, panel_params).metadata)
         if square_aspect:
             # Preserve the selected coordinate limits on every redraw. With
             # constrained layout and a colorbar, adjustable="datalim" can
@@ -640,13 +641,7 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     last_state = getattr(self, "_isar_last_autofit_state", None)
     autofit_limits = None
     if state_key != last_state:
-        img_min = float("inf")
-        img_max = float("-inf")
-        for br in band_results:
-            finite = br["isar_display"][np.isfinite(br["isar_display"])]
-            if finite.size:
-                img_min = min(img_min, float(finite.min()))
-                img_max = max(img_max, float(finite.max()))
+        img_min, img_max = common.finite_data_limits(br['isar_display'] for br in band_results) or (np.nan, np.nan)
         if np.isfinite(img_min) and np.isfinite(img_max) and img_max > img_min:
             cur_zmin = self.spin_plot_zmin.value()
             cur_zmax = self.spin_plot_zmax.value()
@@ -700,7 +695,13 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     parts = [f"{image_name} image updated in {elapsed:.2f}s ({mode_label})"]
     if n_bands > 1:
         parts.append(f" ({n_bands} bands)")
-    notes = []
+    notes = ([] if any(br.get('display_decimated', False) for br in band_results)
+             else ["full computed grid; no automatic display reduction"])
+    peak_metrics = [br.get('psf', {}).get('sampled_peak') for br in band_results]
+    peak_metrics = [metric for metric in peak_metrics if metric]
+    if peak_metrics:
+        notes.append(f"FFT padding ≥4×; weighted-support half-pixel peak loss "
+                     f"≤{max(m['half_pixel_peak_loss_db'] for m in peak_metrics):.3f} dB")
     if any(br.get("time_convention_conjugated") for br in band_results):
         notes.append("negative-time samples normalized automatically; source unchanged")
     contract_assumptions = tuple(params.get("isar_contract_assumptions", ()))

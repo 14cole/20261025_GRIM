@@ -500,6 +500,8 @@ def _build_grid_for_samples(
     }
     if solver_metadata_json:
         payload['solver_metadata_json'] = str(solver_metadata_json)
+    if is_2d_width:
+        payload['imaging_coordinate_convention'] = 'ghost_2d_positive_cos_sin_v1'
     if preserve_raw_complex_amplitude:
         payload['complex_field_domain'] = complex_field_domain
         compact = legacy_components(payload, raw_field, component_dtype=np.float32)
@@ -552,6 +554,7 @@ def _build_grid_for_co_solved_samples(
         for metadata_name in (
             'rcs_domain', 'power_domain', 'units', 'phase_reference',
             'amplitude_convention', 'complex_field_domain',
+            'imaging_coordinate_convention',
         ):
             if metadata_name in reference or metadata_name in payload:
                 if str(reference.get(metadata_name, '')) != str(
@@ -843,6 +846,7 @@ def _save_grim_npz(
 
 
             for key in ('combination_estimate_power',
+                        'imaging_coordinate_convention',
                         'combination_estimate_mode',
                         'combination_estimate_semantics',
                         'solver_metadata_json',

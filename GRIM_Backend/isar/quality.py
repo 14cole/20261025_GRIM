@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 C0 = 299_792_458.0
-ENGINE_VERSION = "2.2.0"
+ENGINE_VERSION = "2.3.0"
 
 
 def cartesian_support_scale(theta, frequency_hz):
@@ -245,3 +245,29 @@ def psf_metrics(weights, window_az, window_freq, theta, frequency_hz, elevation_
     return {"definition": "origin PSF cuts on realized gridded support",
             "cross_range": _profile_metrics(cross, freq.mean() * np.mean(np.diff(theta)), projection, scale),
             "range": _profile_metrics(down, np.mean(np.diff(freq)), projection, scale)}
+
+
+def sampled_peak_metrics(weights, window_az, window_freq, output_shape):
+    """Half-pixel point-peak loss on the actual tapered measurement support.
+
+    This isolates sampling loss, not interpolation error, scene aliasing or
+    physical resolution. Accumulate bounded rows without a padded PSF image.
+    """
+    from .memory import BATCH_BYTES
+    na, nf = weights.shape
+    wa, wf = np.asarray(window_az), np.asarray(window_freq)
+    pa = np.exp(1j*np.pi*np.arange(na)/output_shape[0])
+    pf = np.exp(1j*np.pi*np.arange(nf)/output_shape[1])
+    total = 0.
+    response = np.zeros(4, complex)
+    rows = max(1, BATCH_BYTES // max(nf*16, 1))
+    for start in range(0, na, rows):
+        stop = min(na, start+rows)
+        w = np.asarray(weights[start:stop], dtype=float)*wa[start:stop,None]*wf[None,:]
+        total += float(w.sum())
+        for k, (a, f) in enumerate(((pa, pf), (pa, pf.conj()), (pa, np.ones(nf)), (np.ones(na), pf))):
+            response[k] += np.einsum('ij,i,j->',w,a[start:stop],f,optimize=False)
+    loss = -20*np.log10(np.maximum(abs(response)/max(total,1.e-30),1.e-30))
+    return dict(fft_shape=list(output_shape), padding_factors=[output_shape[0]/na,output_shape[1]/nf],
+        half_pixel_peak_loss_db=float(max(loss)),
+        definition='Point target half-pixel sampling loss from actual tapered support; excludes gridding error and aliasing')

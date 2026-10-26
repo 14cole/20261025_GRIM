@@ -99,30 +99,23 @@ def _prepare_uniform_frequency_history(
     )
 
 
-# Zero-pad each range profile to this many times the sweep length while the
-# padded display stays within the cell budget. Without padding an off-bin
-# point reads up to 3.9 dB (rectangular) / 1.4 dB (Hann) low; 4x padding
-# bounds that scalloping to about 0.22 dB / 0.09 dB, matching Range-Frequency.
+# Padding never falls with dataset size: destinations can be disk-backed.
 _RANGE_PAD_FACTOR = 4
-_RANGE_PAD_MAX_CELLS = 32 * 1024**2
 
 
 def _range_fft_size(n_frequency: int, n_azimuth: int) -> int:
-    """Padded range FFT length: 4x, else 2x, else 1x within the cell budget."""
-    n_frequency, n_azimuth = max(int(n_frequency), 1), max(int(n_azimuth), 1)
-    for factor in (_RANGE_PAD_FACTOR, 2):
-        if n_azimuth * n_frequency * factor <= _RANGE_PAD_MAX_CELLS:
-            return n_frequency * factor
-    return n_frequency
+    from .isar_mode import _next_fast_len
+    return _next_fast_len(_RANGE_PAD_FACTOR * max(int(n_frequency), 1))
 
 
 def _range_scalloping_loss_db(window, n_fft: int) -> float:
     """Worst off-bin peak loss of the windowed profile on an n_fft grid."""
     taper = np.asarray(window, dtype=float)
-    offset = 0.5 * taper.size / max(int(n_fft), 1)  # half a display bin, in native bins
-    phase = np.exp(2j * np.pi * offset * np.arange(taper.size) / taper.size)
-    gain = abs(np.sum(taper * phase)) / max(float(np.sum(taper)), np.finfo(float).tiny)
-    return float(-20.0 * np.log10(max(gain, 1.0e-12)))
+    phase = np.exp(1j * np.pi * np.arange(taper.shape[-1]) / max(int(n_fft), 1))
+    total = np.sum(taper, axis=-1)
+    gain = abs(np.sum(taper * phase, axis=-1)) / np.maximum(total, np.finfo(float).tiny)
+    loss = np.where(total > 0, -20 * np.log10(np.maximum(gain, 1.e-12)), 0.)
+    return float(np.max(loss))
 
 
 def _form_range_image(history, sample_weights, window, n_fft=None):
@@ -152,12 +145,14 @@ def _range_display_values(dataset, magnitude: np.ndarray, *, linear: bool) -> np
     """
 
     del dataset  # retained in the public helper signature for compatibility
-    magnitude = np.asarray(magnitude, dtype=float)
-    intensity = magnitude ** 2
-    if linear:
-        return intensity
-    intensity = np.where(np.isfinite(intensity), intensity, np.nan)
-    return 10.0 * np.log10(np.maximum(intensity, 1.0e-12))
+    intensity = np.array(magnitude, dtype=np.float32, copy=True)
+    np.square(intensity, out=intensity)
+    intensity[~np.isfinite(intensity)] = np.nan
+    if not linear:
+        np.maximum(intensity, np.float32(1.e-12), out=intensity)
+        np.log10(intensity, out=intensity)
+        intensity *= np.float32(10.)
+    return intensity
 
 
 def _range_display_grid(azimuths, ranges, image, *, azimuth_width, max_side, return_peaks=False, cancel=None):
@@ -172,6 +167,8 @@ def _range_display_grid(azimuths, ranges, image, *, azimuth_width, max_side, ret
     ranges = np.asarray(ranges, dtype=float)
     image = np.asarray(image)
     width = float(azimuth_width)
+    if max_side is None:
+        max_side = max(len(ranges), 2 * len(azimuths))
     if (azimuths.ndim != 1 or not azimuths.size or not np.all(np.isfinite(azimuths))
             or np.any(np.diff(azimuths) <= 0)):
         raise ValueError("azimuth samples must be finite and strictly increasing")
@@ -227,6 +224,17 @@ def _range_display_grid(azimuths, ranges, image, *, azimuth_width, max_side, ret
     reduced = len(y_starts) < len(ranges) or block_count < len(azimuths)
     if not reduced and all(block is not None for block in column_blocks):
         result = (np.asarray(edges), y_edges, image, False)
+        return (*result, None) if return_peaks else result
+    if not reduced:
+        # Insert missing-angle columns without allocating native-sized peak
+        # index arrays. Each displayed measured column still has one source.
+        values = allocate_result((len(ranges), len(column_blocks)), image.dtype, fill=np.nan)
+        for column, block in enumerate(column_blocks):
+            if cancel is not None:
+                cancel()
+            if block is not None:
+                values[:, column] = image[:, block[0]]
+        result = (np.asarray(edges), y_edges, values, False)
         return (*result, None) if return_peaks else result
     values, iy, ix = pool_image_peaks(image,
         max(1, int(np.ceil(len(ranges) / max_side))), column_blocks, cancel=cancel)
@@ -349,7 +357,7 @@ def render(self) -> None:
 def _frequency_plan(plan):
     azimuth, _, frequency, _ = plan.selection
     freq_hz = np.asarray(plan.dataset.frequencies[frequency], dtype=float) * _unit_to_hz_scale(
-        str(plan.dataset.units.get("frequency", "ghz")))
+        str(plan.dataset.units.get("frequency", "")))
     return _uniform_resample_plan(freq_hz,
         max_output_samples=max(len(frequency), _MAX_INTERP_COMPLEX_CELLS // max(len(azimuth), 1)))
 
@@ -358,18 +366,11 @@ def prepare_azimuth_range(request, cancel=None, *, batch_bytes=8 * 1024**2):
     """Prepare every selected dataset/elevation/polarization in bounded batches."""
     if len(request.plans) > common.MAX_WATERFALL_PANELS:
         raise ValueError("select fewer datasets, elevations, or polarizations")
-    frequency_plans, total_cells = [], 0
-    maximum = min(common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
+    frequency_plans = []
     for plan in request.plans:
         check_cancel(cancel)
         sampling = _frequency_plan(plan)
         frequency_plans.append(sampling)
-        n_az = len(plan.selection[0])
-        n_fft = _range_fft_size(len(sampling["target"]), n_az)
-        # Include synthetic gap columns in the conservative display bound.
-        total_cells += min(maximum, 2 * n_az - 1) * min(maximum, n_fft)
-    common.validate_aggregate_image_cells(total_cells, panel_count=len(request.plans),
-                                          operation="Az vs Down-Range")
     panels = []
     for index, (plan, sampling) in enumerate(zip(request.plans, frequency_plans)):
         check_cancel(cancel)
@@ -382,6 +383,8 @@ def _prepare_panel(request, plan, frequency_plan, index, cancel, batch_bytes):
     from .isar_mode import _window_array
     dataset = plan.dataset
     flip_y = bool(request.options.get("flip_y", False))
+    from GRIM_Backend.isar.source_frame import is_ghost_frame
+    native_ghost = is_ghost_frame(dataset)
     metadata_notes = []
     time_sign = _range_convention(dataset, flip_y=flip_y, notes=metadata_notes)
     if dataset.phase_coverage() == "none":
@@ -391,7 +394,7 @@ def _prepare_panel(request, plan, frequency_plan, index, cancel, batch_bytes):
     azimuth, elevation, frequency, polarization = plan.selection
     az_values = common.values_for_display(request.reference, dataset, "azimuth", dataset.azimuths[azimuth])
     freq_hz = np.asarray(dataset.frequencies[frequency], dtype=float) * _unit_to_hz_scale(
-        str(dataset.units.get("frequency", "ghz")))
+        str(dataset.units.get("frequency", "")))
     target = np.asarray(frequency_plan["target"], dtype=float)
     window = request.options.get("window_array")
     if "window_arrays" in request.options:
@@ -402,43 +405,38 @@ def _prepare_panel(request, plan, frequency_plan, index, cancel, batch_bytes):
     # One full frequency vector is unavoidable; all additional azimuth rows
     # stay within this scratch target regardless of the total image size.
     rows = max(1, int(batch_bytes) // max(1, 64 * (len(frequency) + len(target)) + 24 * n_fft))
-    any_usable, missing_profiles = False, 0
+    any_usable, missing_profiles, scalloping_loss = False, 0, 0.0
     check_cancel(cancel)
     with operation_result_storage("auto", ram_budget_bytes=16 * 1024**2):
-        display = allocate_result((len(azimuth), n_fft), np.float64)
+        display = allocate_result((len(azimuth), n_fft), np.float32)
         for first in range(0, len(azimuth), rows):
             check_cancel(cancel)
             history = dataset.rcs_slice(np.ix_(azimuth[first:first + rows], elevation,
                                                frequency, polarization))[:, 0, :, 0]
-            if time_sign == "-jwt":
+            if (time_sign == "-jwt") != native_ghost:
                 np.conjugate(history, out=history)
             _, uniform, weights, _ = _prepare_uniform_frequency_history(freq_hz, history, plan=frequency_plan)
             image, usable = _form_range_image(uniform, weights, window, n_fft=n_fft)
+            scalloping_loss = max(scalloping_loss,
+                _range_scalloping_loss_db(weights * np.asarray(window)[None, :], n_fft))
             any_usable = any_usable or bool(np.any(usable))
             missing_profiles += int(np.count_nonzero(~usable))
             magnitude = np.abs(image)
-            display[first:first + rows] = magnitude
+            display[first:first + rows] = _range_display_values(dataset, magnitude, linear=request.scale == "linear")
             del history, uniform, weights, image, magnitude
         if not any_usable:
             raise ValueError("No azimuth row has finite, supported phase history for range processing.")
-        for first in range(0, len(azimuth), rows):
-            check_cancel(cancel)
-            # Retain formation precision before converting amplitude to intensity.
-            magnitude = np.asarray(display[first:first + rows], dtype=np.float32)
-            display[first:first + rows] = _range_display_values(dataset, magnitude,
-                linear=request.scale == "linear")
         ranges = np.fft.fftshift(np.fft.fftfreq(n_fft, d=float(np.mean(np.diff(target)))))
         ranges *= 299_792_458.0 / 2.0 * request.options["unit_scale"]
         if flip_y:
             display = display[:, ::-1]
             ranges = -ranges[::-1]
-        maximum = min(common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
         xe, ye, drawn, reduced, peaks = _range_display_grid(az_values, ranges, display.T,
-            azimuth_width=request.options.get("azimuth_width", native_sample_width(request.reference, dataset, "azimuth")), max_side=maximum,
+            azimuth_width=request.options.get("azimuth_width", native_sample_width(request.reference, dataset, "azimuth")), max_side=None,
             return_peaks=True, cancel=lambda: check_cancel(cancel))
         check_cancel(cancel)
         return dict(x_edges=xe, y_edges=ye, display_for_plot=drawn,
-            display=None if reduced else display, decimated=reduced, peak_indices=peaks,
+            display=display, decimated=reduced, peak_indices=peaks,
             range_axis=ranges, az_values=az_values, freq_hz=freq_hz,
             frequency_sampling=dict(frequency_plan["info"]), range_fft_size=n_fft,
             range_padding_factor=n_fft / len(target),
@@ -446,7 +444,8 @@ def _prepare_panel(request, plan, frequency_plan, index, cancel, batch_bytes):
             missing_profile_count=missing_profiles,
             metadata_notes=metadata_notes,
             time_convention_conjugated=time_sign == "-jwt",
-            range_scalloping_loss_db=_range_scalloping_loss_db(window, n_fft))
+            source_coordinate_convention="ghost_native_slant" if native_ghost else "canonical_slant",
+            range_scalloping_loss_db=scalloping_loss)
 
 
 def _display(self, result):
@@ -498,6 +497,8 @@ def _display(self, result):
     for plan, panel in zip(request.plans, panels):
         sampling = panel["frequency_sampling"]
         details = list(panel.get("metadata_notes", ()))
+        details.append(f"full grid; FFT padding {panel['range_padding_factor']:.2f}×; "
+                       f"sampled-peak loss ≤{panel['range_scalloping_loss_db']:.3f} dB for the weighted support")
         if float(sampling["non_uniformity"]) >= 1e-3:
             details.append(f"resampled frequency (Δ-spread {sampling['non_uniformity']*100:.1f}%)")
         if sampling.get("gap_count", 0):
@@ -563,13 +564,21 @@ def _draw_panel(self, request, plan, panel, ax, vmin, vmax):
             "source_metadata":compact_metadata(dataset.extra),
             "azimuth_gap_count":panel["azimuth_gap_count"],
             "missing_profile_count":panel["missing_profile_count"],
+            "range_fft_size":panel["range_fft_size"],
+            "range_padding_factor":panel["range_padding_factor"],
+            "range_pixel_pitch":float(range_axis[1]-range_axis[0]),
+            "range_scalloping_loss_db":panel["range_scalloping_loss_db"],
+            "range_geometry":"slant",
+            "source_coordinate_convention":panel["source_coordinate_convention"],
             "range_mirrored":bool(request.options.get("flip_y", False)),
             "time_convention_conjugated":panel["time_convention_conjugated"],
             "metadata_notes":panel.get("metadata_notes", [])})
     if peak_indices is not None:
         attach_block_peak_probe(mesh, x_edges, y_edges, az_values, range_axis, *peak_indices)
     ax.set_xlabel(self._plot_axis_label(reference, "azimuth"))
-    ax.set_ylabel(f"Down-Range ({unit_name})")
+    elevation_deg = float(_angle_values_to_degrees(dataset, "elevation", [dataset.elevations[elev_idx]])[0])
+    range_label = "Slant Down-Range" if abs(elevation_deg) > 1.e-8 else "Down-Range"
+    ax.set_ylabel(f"{range_label} ({unit_name})")
     elev_value = common.values_for_display(reference, dataset, "elevation", [dataset.elevations[elev_idx]])[0]
     elev_name = self._plot_axis_name(reference, "elevation")
     elev_unit = self._plot_axis_unit(reference, "elevation")

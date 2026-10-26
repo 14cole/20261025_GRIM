@@ -49,6 +49,18 @@ _QUANTITY_LOG_UNITS = {
     "power_ratio": "dB",
 }
 
+# Simple CSV labels describe stored RCS power, not complex-field amplitude.
+_SIMPLE_MAGNITUDE_UNITS = {
+    "m^2": ("magnitude_power_linear", "sigma_3d", "dBsm"),
+    "m": ("magnitude_power_linear", "sigma_2d", "dBke"),
+    "1": ("magnitude_power_linear", "power_ratio", "dB"),
+    "dBsm": ("magnitude_dbsm", "sigma_3d", "dBsm"),
+    "dBke": ("magnitude_dbke", "sigma_2d", "dBke"),
+    "dB": ("magnitude_db", "power_ratio", "dB"),
+}
+_SIMPLE_COLUMNS = ("polarization", "elevation", "azimuth", "frequency", "magnitude", "phase",
+                   "elevation_unit", "azimuth_unit", "frequency_unit", "magnitude_unit", "phase_unit")
+
 
 _V1_REQUIRED_COLUMNS = (
     "grim_csv_schema",
@@ -146,7 +158,7 @@ def has_flat_csv_signature(path):
     }
     return bool(
         (plain_axes.issubset(fields) or cem_axes.issubset(fields))
-        and any(name in fields for name in _MAGNITUDE_COLUMNS)
+        and (any(name in fields for name in _MAGNITUDE_COLUMNS) or set(_SIMPLE_COLUMNS).issubset(fields))
     )
 
 
@@ -397,7 +409,7 @@ def _csv_fields(fields, delimiter):
 
 
 def _write_flat_csv_block(stream, delimiter, grid, selection, power_block, phase_block, *,
-                          magnitude_columns, phase_wrap, frequency_unit, leading, labels):
+                          magnitude_columns, phase_wrap, frequency_unit, leading, labels, simple=False):
     """Write one sample block of the v1 schema, one numpy pass per column.
 
     Equivalent to formatting row by row: every value is computed with the same
@@ -447,6 +459,27 @@ def _write_flat_csv_block(stream, delimiter, grid, selection, power_block, phase
             else:
                 phase_deg = np.mod(degrees + 180.0, 360.0) - 180.0
             columns.append(_csv_numbers(np.where(np.isfinite(phase_rad), phase_deg, np.nan).reshape(-1)))
+    if simple:
+        column = magnitude_columns[0]
+        magnitude_unit = ({"sigma_3d": "m^2", "sigma_2d": "m", "power_ratio": "1"}[labels[0]]
+                          if column == "magnitude_power_linear" else labels[1])
+        unit_tail = _csv_fields([elevation_unit, azimuth_unit, frequency_unit, magnitude_unit, "deg"], delimiter)
+        # Keep the existing bounded block order and exact numeric formatting.
+        pol_text = [_csv_fields([str(pol)], delimiter) for pol in grid.polarizations[selection[3]]]
+        az_text = _csv_numbers(np.asarray(grid.azimuths[selection[0]], dtype=np.float64))
+        el_text = _csv_numbers(np.asarray(grid.elevations[selection[1]], dtype=np.float64))
+        freq_text = _csv_numbers(np.asarray(frequencies, dtype=np.float64))
+        lines, index = [], 0
+        for az in az_text:
+            for el in el_text:
+                for frequency in freq_text:
+                    axes = delimiter.join((el, az, frequency))
+                    for pol in pol_text:
+                        lines.append(delimiter.join([pol, axes,
+                            columns[0][index], columns[1][index], unit_tail]) + "\r\n")
+                        index += 1
+        stream.write("".join(lines))
+        return
     tails = [delimiter + delimiter.join(cells) for cells in zip(*columns)] if columns else None
     lines = []
     index = 0
@@ -460,7 +493,7 @@ def _write_flat_csv_block(stream, delimiter, grid, selection, power_block, phase
 
 
 def _write_flat_csv_direct(
-    grid, path, scale="linear", delimiter=",", include_phase=False
+    grid, path, scale="linear", delimiter=",", include_phase=False, *, simple=False
 ):
     """Stream *grid* using ``grim.flat-rcs.v1`` and return *path*.
 
@@ -473,6 +506,10 @@ def _write_flat_csv_direct(
     scale = str(scale or "linear").strip().lower()
     if scale not in ("linear", "db", "dbsm", "dbke", "both"):
         raise ValueError("CSV scale must be linear, db, dbsm, dbke, or both")
+    if simple:
+        if scale == "both":
+            raise ValueError("Simple CSV contains one magnitude column; select a single magnitude scale")
+        include_phase = True
     if delimiter not in (",", "\t"):
         raise ValueError("flat CSV delimiter must be a comma or tab")
 
@@ -520,9 +557,9 @@ def _write_flat_csv_direct(
     angular_coordinate_system = "conic"
     gc_convention = ""
     angular_roll_deg = angular_tilt_deg = 0.0
-    polarization_basis = _declared_grid_metadata(grid, "polarization_basis")
-    time_convention = _declared_grid_metadata(grid, "time_convention")
-    phase_reference = _declared_grid_metadata(grid, "phase_reference")
+    polarization_basis = "" if simple else _declared_grid_metadata(grid, "polarization_basis")
+    time_convention = "" if simple else _declared_grid_metadata(grid, "time_convention")
+    phase_reference = "" if simple else _declared_grid_metadata(grid, "phase_reference")
     phase_wrap = _canonical_phase_wrap((getattr(grid, "units", {}) or {}).get(
         "phase_wrap", "-180_180"
     ))
@@ -553,6 +590,8 @@ def _write_flat_csv_direct(
     ] + magnitude_columns
     if include_phase:
         header.append("phase_deg")
+    if simple:
+        header = list(_SIMPLE_COLUMNS)
 
     power_array = grid.power
     phase_array = grid.phase if include_phase else None
@@ -586,17 +625,21 @@ def _write_flat_csv_direct(
                         gc_convention, _finite_csv_number(angular_roll_deg),
                         _finite_csv_number(angular_tilt_deg), polarization_basis,
                         time_convention, phase_reference, phase_wrap],
+                **({"simple": True} if simple else {}),
             )
     return path
 
 
-def write_flat_csv(grid, path, scale="linear", delimiter=",", include_phase=False):
+def write_flat_csv(grid, path, scale="linear", delimiter=",", include_phase=False, *, simple=False):
     """Atomically publish a versioned flat-RCS table.
 
     Validation, formatting, or I/O failures leave an existing destination
     untouched. The streaming implementation retains one bounded sample block
     and one formatted row beyond the dataset arrays. Phase is derived only
     when the export includes it.
+    ``simple=True`` writes the six sample fields plus unit columns, always
+    includes phase, and omits provenance. The default preserves detailed v1
+    output for existing API callers; the desktop popup defaults to simple.
     """
 
     requested_path = os.fspath(path)
@@ -613,6 +656,7 @@ def write_flat_csv(grid, path, scale="linear", delimiter=",", include_phase=Fals
             scale=scale,
             delimiter=delimiter,
             include_phase=include_phase,
+            simple=simple,
         )
         os.replace(stage_path, output_path)
     finally:
@@ -736,12 +780,29 @@ class _FlatCsvSource:
                 raise ValueError("missing CSV header row")
             self.fieldnames = list(reader.fieldnames)
         self.fields = _field_map(self.fieldnames)
+        self._raw_fields = dict(self.fields)
+        self._simple_unit = None
+        if set(_SIMPLE_COLUMNS).issubset(self.fields):
+            with open_text_table(self.path, newline="") as stream:
+                reader = csv.DictReader(stream, delimiter=self.delimiter)
+                first = next((row for row in reader if any(str(v or '').strip() for v in row.values())), None)
+            if first is None:
+                raise ValueError(self.empty_message)
+            unit = str(first.get(self.fields['magnitude_unit'], '')).strip()
+            if unit not in _SIMPLE_MAGNITUDE_UNITS:
+                raise ValueError(f"Unsupported simple CSV magnitude unit {unit!r}")
+            self._simple_unit = unit
+            column, _, _ = _SIMPLE_MAGNITUDE_UNITS[unit]
+            self.fields[column] = self.fields['magnitude']
+            self.fields['phase_deg'] = self.fields['phase']
+            self.fields['rcs_linear_quantity'] = '__simple_quantity'
+            self.fields['rcs_log_unit'] = '__simple_log_unit'
 
     def rows(self, stage):
         detail = "Discovering CSV coordinates" if stage == "discover" else "Reading CSV samples"
         with open_text_table(self.path, newline="") as stream:
             reader = csv.DictReader(stream, delimiter=self.delimiter)
-            if stage == "samples" and _field_map(reader.fieldnames) != self.fields:
+            if stage == "samples" and _field_map(reader.fieldnames) != self._raw_fields:
                 raise ValueError("CSV header changed while the file was being loaded")
             for line_no, row in enumerate(reader, start=2):
                 if line_no % 1024 == 0:
@@ -758,6 +819,13 @@ class _FlatCsvSource:
                     raise ValueError(
                         "line {}: {} fewer value(s) than header columns "
                         "(truncated row)".format(line_no, missing))
+                if self._simple_unit is not None:
+                    if str(row[self.fields['magnitude_unit']]).strip() != self._simple_unit:
+                        raise ValueError(f"line {line_no}: simple CSV magnitude units must be consistent")
+                    if str(row[self.fields['phase_unit']]).strip() != 'deg':
+                        raise ValueError(f"line {line_no}: simple CSV phase_unit must be deg")
+                    _, quantity, log_unit = _SIMPLE_MAGNITUDE_UNITS[self._simple_unit]
+                    row['__simple_quantity'], row['__simple_log_unit'] = quantity, log_unit
                 yield line_no, row
 
 

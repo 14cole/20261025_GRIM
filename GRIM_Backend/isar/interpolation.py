@@ -69,6 +69,7 @@ def interpolate_pair(field, coverage, coordinates):
     """Apply one geometry plan to a complex numerator and positive coverage."""
     n = field.shape[0]
     base, t, valid, interior = _plan(coordinates, n)
+    fully_observed = bool(np.all(coverage == 1))
     take = lambda a, j: np.take_along_axis(a, j, axis=0)
     f0, f1 = take(field, base), take(field, base + 1)
     w0, w1 = take(coverage, base), take(coverage, base + 1)
@@ -100,7 +101,8 @@ def interpolate_pair(field, coverage, coordinates):
         mix = table_position - table_index
         for offset in range(1 - radius, radius + 1):
             index = np.clip(base + offset, 0, n - 1)
-            complete &= take(coverage, index) == 1
+            if not fully_observed:
+                complete &= take(coverage, index) == 1
             tap = offset + radius - 1
             k0 = _SINC_TABLE[table_index, tap]
             kernel = (k0 + (_SINC_TABLE[table_index+1, tap] - k0) * mix).astype(np.float32)

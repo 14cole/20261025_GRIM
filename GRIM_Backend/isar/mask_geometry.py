@@ -80,6 +80,8 @@ def define_mask(image, vertices, include=True):
                       boundary_rule='pixel_centers_including_boundary',
                       boundary_tolerance_metres=BOUNDARY_TOLERANCE_METRES,
                       source_recipe=dict(reconstruction=image.metadata.get('reconstruction'),
+                          source_coordinate_convention=image.metadata.get('contract', {}).get('source_coordinate_convention', 'canonical'),
+                          engine_version=image.metadata.get('contract', {}).get('engine_version'),
                           window=image.metadata.get('window'), elevation_degrees=image.metadata.get('elevation_degrees'),
                           grid_shape=list(image.magnitude.shape),
                           x_extent=[float(image.x[0]), float(image.x[-1])],

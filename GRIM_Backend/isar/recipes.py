@@ -103,7 +103,7 @@ def recipe_arguments(dataset, recipe):
     aperture_mode(options.get('aperture_mode', 'auto'))
     scene_extents(options.get('scene_half_extent_m'))
     side = options.get('composite_side', 1024)
-    if isinstance(side, bool) or not isinstance(side, int) or not 32 <= side <= 4096:
+    if isinstance(side, bool) or not isinstance(side, int) or side < 32:
         raise ValueError('Invalid recipe composite grid size')
     from .memory import resolve_memory_limit
     if options.get('memory_limit_bytes') is not None:

@@ -57,6 +57,7 @@ class MaskImageRequest:
     params: dict
     display: dict = field(default_factory=dict)
     source_digest: str | None = None
+    metadata: dict = field(default_factory=dict)
 
 
 def prepare_mask_source(request, cancel=None):
@@ -79,7 +80,7 @@ def reconstruction_extra(dataset):
     """Retain coordinate/field lineage without claiming solver certification."""
     extra = dataset._safe_derived_scalar_extra(include_field_conventions=True)
     for key in ("phase_center_xyz_m", "phase_reference", "time_convention", "polarization_basis",
-                "range_phase_convention", "measurement_geometry", "measurement_domain",
+                "range_phase_convention", "imaging_coordinate_convention", "complex_field_domain", "measurement_geometry", "measurement_domain",
                 "motion_compensation", "phase_center_motion"):
         if key in (dataset.extra or {}):
             extra[key] = deepcopy(dataset.extra[key])
@@ -117,9 +118,11 @@ def _check(cancel):
         raise PlotCancelled()
 
 
-def mask_preview(image, cancel=None, max_side=1200):
-    """Bounded display with exact block peaks; cuts still use native centers."""
+def mask_preview(image, cancel=None, max_side=None):
+    """Full-resolution preview; explicit overview sizes remain opt-in."""
     from .geometry import pool_image_peaks, reduced_axis_edges
+    if max_side is None:
+        max_side = max(image.magnitude.shape)
     sx, sy = (max(1, int(np.ceil(size / max_side))) for size in image.magnitude.shape)
     if sx == sy == 1:
         values = np.asarray(image.magnitude, dtype=np.float32)

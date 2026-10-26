@@ -610,7 +610,6 @@ def plot_datasets(
         if not recipes or len(recipes) > plot_common.MAX_WATERFALL_PANELS:
             raise ValueError("ISAR selection must contain between 1 and 24 panels")
         bands, identities = [], []
-        cells = 0
         for recipe in recipes:
             dataset_index = int(recipe['dataset_index'])
             if not 0 <= dataset_index < len(selected):
@@ -619,7 +618,7 @@ def plot_datasets(
             options = dict(recipe.get('isar_options') or {})
             options['aperture_mode'] = 'composite' if mode_key == 'isar_composite' else 'coherent'
             options.setdefault('length_unit', 'in')
-            options.update(decimate_display=True, retain_complex=False)
+            options.update(decimate_display=False, retain_complex=False)
             az_idx = _indices(dataset.azimuths, recipe['azimuths'])
             fr_idx = _indices(dataset.frequencies, recipe['frequencies'])
             el_idx = _indices(dataset.elevations, recipe['elevations'])[0]
@@ -632,10 +631,8 @@ def plot_datasets(
             identity = (name, dataset, pol_idx, elevation_deg, unit_name)
             bands.extend(formed)
             identities.extend([identity] * len(formed))
-            cells += sum(band['magnitude'].size for band in formed)
             if len(bands) > plot_common.MAX_WATERFALL_PANELS:
                 raise ValueError("ISAR selection creates more than 24 panels")
-            plot_common.validate_aggregate_image_cells(cells, panel_count=len(bands), operation='ISAR selection')
         compatible_count = len(recipes)
         figure.clear()
         # Match the GUI's centered fixed-aspect image/colorbar group.
@@ -705,7 +702,7 @@ def plot_datasets(
             )[0]
         )
         elevation_name = plot_common.angular_axis_name(dataset, "elevation")
-        reconstruction = str(options.get("reconstruction", "fast")).strip().lower()
+        reconstruction = str(options.get("reconstruction", "auto")).strip().lower()
         resolved = {band.get('resolved_reconstruction', reconstruction) for band in bands}
         if len(resolved) > 1:
             reconstruction_label = "PFA method selected per aperture"

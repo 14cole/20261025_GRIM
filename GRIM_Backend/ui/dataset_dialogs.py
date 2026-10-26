@@ -1392,6 +1392,10 @@ class ExportCsvDialog(QDialog):
         self.setWindowTitle("Export to CSV")
         layout = QVBoxLayout(self)
 
+        self._chk_simple = QCheckBox("Simple CSV (sample values and units only)")
+        self._chk_simple.setChecked(True)
+        layout.addWidget(self._chk_simple)
+
         grid = QGridLayout()
         grid.addWidget(QLabel("Magnitude:"), 0, 0)
         self._combo_scale = QComboBox()
@@ -1408,23 +1412,41 @@ class ExportCsvDialog(QDialog):
         self._chk_phase.setChecked(True)
         layout.addWidget(self._chk_phase)
 
-        layout.addWidget(QLabel(
-            "Writes versioned GRIM flat RCS CSV with explicit axis units, physical "
-            "quantity, coordinate convention, and coherent metadata.\n"
-            "For dBke export, frequency-dependent conversion uses the dataset frequency axis.\n"
-            "One row per sample — all combinations of dataset axes."
-        ))
+        self._description = QLabel()
+        self._description.setWordWrap(True)
+        layout.addWidget(self._description)
+        self._chk_simple.toggled.connect(self._update_format)
+        self._update_format()
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
 
-    def get_options(self) -> tuple[str, bool]:
-        """Return (scale, include_phase)."""
+    def _update_format(self) -> None:
+        simple = self._chk_simple.isChecked()
+        both = self._combo_scale.findData("both")
+        if simple and self._combo_scale.currentData() == "both":
+            self._combo_scale.setCurrentIndex(self._combo_scale.findData("linear"))
+        self._combo_scale.model().item(both).setEnabled(not simple)
+        self._chk_phase.setEnabled(not simple)
+        if simple:
+            self._chk_phase.setChecked(True)
+        self._description.setText(
+            "Polarization, elevation, azimuth, frequency, magnitude and phase, plus units. "
+            "One row per sample. Linear magnitude is RCS power; unknown phase is blank. "
+            "Uncheck Simple CSV to include the detailed metadata."
+            if simple else
+            "Detailed GRIM CSV includes axis units, physical quantity and coherent metadata. "
+            "One row per sample. dBke conversion uses each sample's frequency."
+        )
+
+    def get_options(self) -> tuple[str, bool, bool]:
+        """Return (scale, include_phase, simple)."""
         return (
             self._combo_scale.currentData(),
             self._chk_phase.isChecked(),
+            self._chk_simple.isChecked(),
         )
 
 def _percentile_interpolation_checkbox() -> QCheckBox:

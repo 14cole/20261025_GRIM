@@ -3354,6 +3354,8 @@ class DatasetOpsMixin:
             deleted_rows.append((row, items))
         for row in rows:
             self.table.removeRow(row)
+        from GRIM_Backend.plotting.modes.isar_mode import clear_preprocess_cache
+        clear_preprocess_cache()
         self._last_deleted_dataset_rows = deleted_rows
         self.active_dataset = None
         self._clear_param_lists()
@@ -6078,7 +6080,7 @@ class DatasetOpsMixin:
         dlg = ExportCsvDialog(parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
-        scale, include_phase = dlg.get_options()
+        scale, include_phase, simple = dlg.get_options()
 
         entries: list[tuple[RcsGrid, str]] = []
         if len(datasets) == 1:
@@ -6139,12 +6141,12 @@ class DatasetOpsMixin:
 
         row_counts = [math.prod(dataset.power.shape) for dataset, _ in entries]
         total_rows = sum(row_counts)
-        # V1 repeats explicit physical metadata per row for robust standalone
-        # interchange. This conservative estimate is used only for time/disk UI.
+        # Simple rows omit the repeated provenance in the detailed format.
+        # This conservative estimate is used only for time/disk UI.
         entry_estimated_bytes = []
         try:
             for (dataset, _target), count in zip(entries, row_counts):
-                metadata_chars = sum(
+                metadata_chars = 0 if simple else sum(
                     len(str(dataset._declared_scalar_metadata(key) or ""))
                     for key in (
                         "phase_reference",
@@ -6155,7 +6157,7 @@ class DatasetOpsMixin:
                 entry_estimated_bytes.append(
                     count
                     * (
-                        300
+                        (180 if simple else 300)
                         + max(
                             (len(str(value)) for value in dataset.polarizations),
                             default=0,
@@ -6205,6 +6207,7 @@ class DatasetOpsMixin:
             entries,
             scale=scale,
             include_phase=include_phase,
+            simple=simple,
         )
         worker.progress.connect(self._on_csv_export_progress)
         worker.finished.connect(self._on_csv_export_finished)

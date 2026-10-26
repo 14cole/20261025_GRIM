@@ -416,12 +416,14 @@ class _CsvExportWorker(QObject):
         *,
         scale: str,
         include_phase: bool,
+        simple: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._entries = list(entries)
         self._scale = str(scale)
         self._include_phase = bool(include_phase)
+        self._simple = bool(simple)
 
     @_cooperative_worker
     def run(self) -> None:
@@ -432,6 +434,7 @@ class _CsvExportWorker(QObject):
                 self._entries,
                 scale=self._scale,
                 include_phase=self._include_phase,
+                simple=self._simple,
             )
         except WorkCancelled:
             self.finished.emit({"ok": False, "cancelled": True, "total": total})

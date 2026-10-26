@@ -37,9 +37,13 @@ def geometry(azimuth_degrees, frequency_hz, elevation_degrees, half=None, center
     resolution = 2 * np.pi / (factor * np.array([np.ptp(u), np.ptp(v)]))
     # Resolve the physical complex carrier as well as the magnitude envelope.
     spacing = np.minimum(resolution / 3, np.pi / (factor * np.array([abs(u).max(), abs(v).max()])))
-    counts = np.maximum(1, np.ceil(half / spacing)).astype(np.int64)
-    if np.any(counts > 2047):
-        raise ValueError('Backprojection needs more than 4095 pixels on an axis; reduce the scene half extents in Advanced settings.')
+    ratios = half / spacing
+    if not np.all(np.isfinite(ratios)) or np.any(ratios <= 0):
+        raise ValueError('Backprojection requires finite positive scene extents and pixel spacing.')
+    counts = [max(1, int(np.ceil(value))) for value in ratios]
+    from GRIM_Backend.plotting.modes.isar_mode import _validate_isar_working_set
+    _validate_isar_working_set(120 * (2 * int(counts[0]) + 1) * (2 * int(counts[1]) + 1)
+        + 32 * next_fast_len(32 * len(freq)) + 8*1024**2, operation='Coherent backprojection')
     axes = [np.linspace(-h, h, 2 * int(n) + 1) for h, n in zip(half, counts)]
     return theta, center, full_circle, factor, axes, resolution, radius
 

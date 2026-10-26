@@ -80,6 +80,8 @@ def native_image_residual(image, x_axis, y_axis, contract, azimuth_degrees, freq
     if not len(ix):
         return {"status": "not_computed", "reason": "No retained image support"}
     az, freq = np.asarray(azimuth_degrees), np.asarray(frequency_hz)
+    if contract.get('source_coordinate_convention') == 'ghost_2d_positive_cos_sin_v1':
+        az = 270. - az
     total = len(az) * len(freq)
     sample_limit = min(maximum_samples, max(1, maximum_interactions // len(ix)))
     ids = np.unique(np.linspace(0, total - 1, min(total, sample_limit), dtype=np.int64))

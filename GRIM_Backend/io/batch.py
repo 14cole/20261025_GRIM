@@ -283,6 +283,7 @@ def _write_dataset_csv(
     scale: str = "linear",
     sep: str = ",",
     include_phase: bool = True,
+    simple: bool = False,
 ) -> None:
     """Atomically write the authoritative versioned flat-RCS interchange."""
 
@@ -299,6 +300,7 @@ def _write_dataset_csv(
             scale=scale,
             delimiter=sep,
             include_phase=bool(include_phase),
+            simple=simple,
         )
         os.replace(stage_path, output_path)
     finally:
@@ -318,6 +320,7 @@ def _stage_and_publish_csv_batch(
     *,
     scale: str,
     include_phase: bool,
+    simple: bool = False,
 ) -> list[str]:
     """Write every CSV first, then transactionally publish the whole batch."""
 
@@ -346,6 +349,7 @@ def _stage_and_publish_csv_batch(
                     scale=scale,
                     delimiter=",",
                     include_phase=include_phase,
+                    simple=simple,
                 )
             except Exception:
                 try:

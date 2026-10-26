@@ -300,14 +300,14 @@ class SpatialOverlayPanel(QDialog):
             return
         try:
             from GRIM_Backend.isar.mask_geometry import PREFIX, load_mask
-            from GRIM_Backend.isar.masking import MaskImage
+            from GRIM_Backend.isar.masking import MaskImage, MaskImageRequest
             with open(filename, encoding='utf-8-sig') as stream:
                 native_mask = stream.readline(64).startswith(PREFIX)
             if native_mask:
                 ax = self._axis()
                 source = next((getattr(artist, '_grim_mask_source', None)
                     for artist in (*ax.images, *ax.collections)
-                    if isinstance(getattr(artist, '_grim_mask_source', None), MaskImage)), None)
+                    if isinstance(getattr(artist, '_grim_mask_source', None), (MaskImage, MaskImageRequest))), None)
                 if source is None:
                     raise ValueError('Plot a static ISAR image to load a saved mask in its physical coordinate frame.')
                 points, _ = load_mask(filename, source)

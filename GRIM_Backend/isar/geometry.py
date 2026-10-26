@@ -92,7 +92,7 @@ def image_axis_labels(band, unit_name, elevation_degrees=0.0, *, explicit_frame=
     if band.get("composite"):
         return f"Cross-Range at 0° ({unit_name})", f"Down-Range at 0° ({unit_name})"
     frame = ""
-    if explicit_frame:
+    if explicit_frame or band.get('image_contract', {}).get('source_coordinate_convention'):
         center = band.get("image_contract", {}).get("look_center_degrees")
         if center is None:
             center = float(np.mean(band["az_values"]))

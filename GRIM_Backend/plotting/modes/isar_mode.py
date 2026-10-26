@@ -14,7 +14,7 @@ from . import common
 from GRIM_Backend.isar.geometry import angular_bands, angular_sublooks
 from GRIM_Backend.isar.interpolation import cartesian_pair, plan_cache_bytes, resample_pair
 from GRIM_Backend.isar.quality import (
-    plan_isar, image_contract, psf_metrics, scene_extents, cartesian_support_scale,
+    plan_isar, image_contract, psf_metrics, scene_extents, cartesian_support_scale, ENGINE_VERSION,
     aperture_mode as normalize_aperture_mode,
 )
 from GRIM_Backend.isar.memory import (
@@ -420,6 +420,11 @@ def _window_array(name: str, n: int) -> np.ndarray:
     return np.hanning(n)
 
 
+def _fft_size(n: int) -> int:
+    """Four samples per native FFT bin, independent of image size."""
+    return _next_fast_len(max(4 * int(n), 256))
+
+
 def _next_fast_len(n: int) -> int:
     """Smallest 5-smooth number (2^a·3^b·5^c) >= n — the FFT sizes pocketfft
     computes fastest (numpy has no next_fast_len; scipy's isn't a dependency)."""
@@ -460,7 +465,7 @@ def _compute_band_polar_format(
     angle/frequency data Cartesian and is not a full-circle reconstruction.
     Wide coherent apertures are handled by the native backprojection path.
 
-    Both axes are zero-padded to `next_fast_len` (with a floor for display
+    Both axes are zero-padded to at least four times their sample counts (with a floor for display
     smoothness). Padding never changes the scene extent — only the pixel
     pitch — and the pad-ratio rescale below keeps amplitudes on the
     canonical unpadded `1 / (n_az · n_freq)` ifft2 convention, so absolute
@@ -486,18 +491,19 @@ def _compute_band_polar_format(
             raise ValueError("ISAR sample weights must match the phase-history shape")
         # Row sums preserve the coherent normalization without allocating a
         # second full aperture-sized weights array.
-        coherent_gain = float(np.sum(np.asarray([
-            np.sum(weights[row] * win_az[row] * win_freq, dtype=np.float64)
-            for row in range(n_az)
-        ], dtype=np.float64)))
+        coherent_gain = 0.0
+        rows = max(1, BATCH_BYTES // max(8 * n_freq, 1))
+        for first in range(0, n_az, rows):
+            coherent_gain += float(np.einsum("ij,i,j->", weights[first:first+rows],
+                win_az[first:first+rows], win_freq, dtype=np.float64, optimize=False))
     if coherent_gain <= 0.0:
         return "ISAR selected data has zero weighted aperture coverage."
 
     # Pad to fast FFT lengths: primes (e.g. 1601 frequencies) fall back to
     # Bluestein and are several times slower; the display floor keeps small
     # selections from rendering as a handful of blocky pixels.
-    n_az_fft = _next_fast_len(max(n_az, 256))
-    n_freq_fft = _next_fast_len(max(n_freq, 256))
+    n_az_fft = _fft_size(n_az)
+    n_freq_fft = _fft_size(n_freq)
 
     if _cancel_requested(cancel_check):
         return "ISAR computation superseded."
@@ -736,8 +742,8 @@ def _estimate_band_working_set_bytes(
     n_azimuth = max(int(n_azimuth), 1)
     n_frequency = max(int(n_frequency), 1)
     source_cells = n_azimuth * n_frequency
-    n_az_fft = _next_fast_len(max(n_azimuth, 256))
-    n_freq_fft = _next_fast_len(max(n_frequency, 256))
+    n_az_fft = _fft_size(n_azimuth)
+    n_freq_fft = _fft_size(n_frequency)
     image_cells = n_az_fft * n_freq_fft
     reconstruction = str(reconstruction).strip().lower()
 
@@ -812,7 +818,7 @@ def _cancel_requested(cancel_check) -> bool:
 # cine mode from retaining several platform-sized arrays. Set to zero to
 # disable, or tune for a workstation with GRIM_ISAR_CACHE_MB.
 _PREPROCESS_CACHE: OrderedDict[tuple, dict] = OrderedDict()
-_PREPROCESS_CACHE_LIMIT = max(int(os.environ.get("GRIM_ISAR_CACHE_MB", "512")), 0) * 1024**2
+_PREPROCESS_CACHE_LIMIT = max(int(os.environ.get("GRIM_ISAR_CACHE_MB", "256")), 0) * 1024**2
 _PREPROCESS_CACHE_BYTES = 0
 _PREPROCESS_CACHE_LOCK = threading.RLock()
 
@@ -1209,6 +1215,7 @@ def _isar_metadata_token(dataset, elevation_index: int, polarization_index: int)
         _declared_scalar_metadata(dataset, key)
         for key in (
             "phase_reference", "time_convention", "polarization_basis",
+            "imaging_coordinate_convention", "complex_field_domain",
             *_ISAR_GEOMETRY_METADATA_KEYS,
             *_ISAR_MOTION_METADATA_KEYS,
             *_ISAR_RANGE_PHASE_METADATA_KEYS,
@@ -1425,6 +1432,14 @@ def _selected_data_token(
             while len(cache) > 8:
                 del cache[next(iter(cache))]
     return token
+
+
+def clear_preprocess_cache():
+    """Release retained preparation arrays when source datasets are closed."""
+    global _PREPROCESS_CACHE_BYTES
+    with _PREPROCESS_CACHE_LOCK:
+        _PREPROCESS_CACHE.clear()
+        _PREPROCESS_CACHE_BYTES = 0
 
 
 def _preprocess_cache_get(key: tuple):
@@ -1701,16 +1716,16 @@ def _compute_band(
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
 
-        observed = allocate_result(rcs_slice.shape, np.complex64, fill=0)
+        observed = rcs_slice  # already contains coverage-weighted numerator
         for block in result_blocks(rcs_slice.shape):
             if _cancel_requested(cancel_check):
                 return "ISAR computation superseded."
             np.clip(weights[block], 0., 1., out=weights[block])
-            np.divide(rcs_slice[block], weights[block], out=observed[block], where=weights[block] > 1.e-6)
+            observed[block][weights[block] <= 1.e-6] = 0
         del rcs_slice
         df_eff = float(np.mean(np.diff(freq_uniform)))
         prep = {
-            "observed": observed,
+            "weighted_numerator": observed,
             "weights": weights,
             "theta": np.asarray(theta, dtype=float),
             "freq": np.asarray(freq_uniform, dtype=float),
@@ -1728,7 +1743,7 @@ def _compute_band(
         }
         _preprocess_cache_put(cache_key, prep)
 
-    observed = prep["observed"]
+    observed = prep["weighted_numerator"]
     weights = prep["weights"]
     theta = prep["theta"]
     freq_uniform = prep["freq"]
@@ -1770,7 +1785,7 @@ def _compute_band(
     out = _compute_band_polar_format(
         window_name, observed, theta, freq_uniform, df_eff, unit_scale,
         sample_weights=weights, elevation_deg=elevation_deg,
-        cancel_check=cancel_check, apply_sample_weights=True,
+        cancel_check=cancel_check, apply_sample_weights=False,
     )
     if isinstance(out, str):
         return out
@@ -1816,6 +1831,10 @@ def _compute_band(
     if psf is None:
         psf = psf_metrics(weights, _window_array(window_name, len(theta)),
             _window_array(window_name, len(freq_uniform)), theta, freq_uniform, elevation_deg, unit_scale)
+        from GRIM_Backend.isar.quality import sampled_peak_metrics
+        psf['sampled_peak'] = sampled_peak_metrics(weights, _window_array(window_name, len(theta)),
+            _window_array(window_name, len(freq_uniform)), magnitude.shape)
+        psf['sampled_peak']['pixel_pitch'] = [float(x_range[1]-x_range[0]), float(y_range[1]-y_range[0])]
         with _PREPROCESS_CACHE_LOCK:
             cache = prep.setdefault("psf_metrics", {})
             if len(cache) >= 8:
@@ -2058,14 +2077,76 @@ def _predict_sublook_scene_axes(
         _q, theta, freq_uniform = _cartesian_pfa_axes(theta, freq_uniform)
     df_eff = float(np.mean(np.diff(freq_uniform)))
     return _scene_axes(
-        _next_fast_len(max(theta.size, 256)),
-        _next_fast_len(max(freq_uniform.size, 256)),
+        _fft_size(theta.size),
+        _fft_size(freq_uniform.size),
         theta,
         freq_uniform,
         df_eff,
         unit_scale,
         elevation_deg=elevation_deg,
     )
+
+
+def _composite_geometry(dataset, band_az_indices, freq_hz, unit_scale, *, recon,
+                        elevation_deg, az_center_deg=None, composite_side=1024,
+                        scene_half_extent_m=None, cancel_check=None):
+    """Shared GUI/worker output geometry, before allocating image pixels."""
+    az_all = _angle_values_to_degrees(dataset, "azimuth", dataset.azimuths)
+    az_vals = az_all[band_az_indices]
+    if az_center_deg is not None:
+        az_vals = _unwrap_degrees(az_vals, az_center_deg)
+    order = np.argsort(az_vals)
+    idx_sorted = [band_az_indices[i] for i in order]
+    az_sorted = az_vals[order]
+    physical_az = az_all.copy()
+    physical_az[idx_sorted] = az_sorted
+    try:
+        chunks = angular_sublooks(idx_sorted, physical_az, maximum_span=_COMPOSITE_SUB_DEG)
+    except ValueError as exc:
+        return f"Wide-aperture composite: {exc}"
+    chunk_specs: list[tuple[list[int], float]] = []
+    body_half = np.zeros(2)
+    pixel_pitch = float("inf")
+    for raw_chunk in chunks:
+        if _cancel_requested(cancel_check):
+            return "ISAR computation superseded."
+        chunk = [int(value) for value in raw_chunk]
+        if len(chunk) < 2:
+            continue
+        try:
+            x_axis, y_axis = _predict_sublook_scene_axes(
+                dataset,
+                chunk,
+                freq_hz,
+                unit_scale,
+                reconstruction=recon,
+                elevation_deg=elevation_deg,
+                az_center_deg=az_center_deg,
+            )
+        except ValueError as exc:
+            return f"Wide-aperture composite preflight failed: {exc}"
+        chunk_az = az_all[chunk]
+        if az_center_deg is not None:
+            chunk_az = _unwrap_degrees(chunk_az, az_center_deg)
+        center = np.deg2rad(float(np.mean(chunk_az)))
+        ct, st = abs(np.cos(center)), abs(np.sin(center))
+        hx, hy = float(np.max(abs(x_axis))), float(np.max(abs(y_axis)))
+        body_half = np.maximum(body_half, [ct*hx + st*hy, st*hx + ct*hy])
+        pixel_pitch = min(pixel_pitch, abs(float(x_axis[1]-x_axis[0])),
+                          abs(float(y_axis[1]-y_axis[0])))
+        chunk_specs.append((chunk, center))
+    if not chunk_specs or not np.isfinite(pixel_pitch):
+        return "Wide-aperture composite: no sub-aperture had ≥2 azimuth samples."
+
+    # Cover the union of rotated sublook rectangles. Preserve their finest
+    # pixel pitch and include the origin exactly; the requested side is a
+    # minimum sampling density, never a ceiling that discards resolution.
+    half = scene_extents(scene_half_extent_m)
+    if half is not None:
+        body_half = np.minimum(body_half, np.asarray(half) * unit_scale)
+    pitch = min(pixel_pitch, 2 * min(body_half) / max(int(composite_side)-1, 1))
+    counts = [2 * int(np.ceil(h / pitch)) + 1 for h in body_half]
+    return idx_sorted, az_sorted, physical_az, chunk_specs, half, body_half, pitch, counts
 
 
 def _compute_band_composite(
@@ -2090,51 +2171,13 @@ def _compute_band_composite(
     cancel_check=None,
 ):
     """Stream a qualitative max-look composite of coherent narrow looks."""
-    az_all = _angle_values_to_degrees(dataset, "azimuth", dataset.azimuths)
-    az_vals = az_all[band_az_indices]
-    if az_center_deg is not None:
-        az_vals = _unwrap_degrees(az_vals, az_center_deg)
-    order = np.argsort(az_vals)
-    idx_sorted = [band_az_indices[i] for i in order]
-    az_sorted = az_vals[order]
-    physical_az = az_all.copy()
-    physical_az[idx_sorted] = az_sorted
-    try:
-        chunks = angular_sublooks(idx_sorted, physical_az, maximum_span=_COMPOSITE_SUB_DEG)
-    except ValueError as exc:
-        return f"Wide-aperture composite: {exc}"
-    chunk_specs: list[tuple[list[int], float]] = []
-    common_half = float("inf")
-    for raw_chunk in chunks:
-        if _cancel_requested(cancel_check):
-            return "ISAR computation superseded."
-        chunk = [int(value) for value in raw_chunk]
-        if len(chunk) < 2:
-            continue
-        try:
-            x_axis, y_axis = _predict_sublook_scene_axes(
-                dataset,
-                chunk,
-                freq_hz,
-                unit_scale,
-                reconstruction=recon,
-                elevation_deg=elevation_deg,
-                az_center_deg=az_center_deg,
-            )
-        except ValueError as exc:
-            return f"Wide-aperture composite preflight failed: {exc}"
-        common_half = min(
-            common_half,
-            float(np.max(np.abs(x_axis))),
-            float(np.max(np.abs(y_axis))),
-        )
-        chunk_az = az_all[chunk]
-        if az_center_deg is not None:
-            chunk_az = _unwrap_degrees(chunk_az, az_center_deg)
-        chunk_specs.append((chunk, np.deg2rad(float(np.mean(chunk_az)))))
-    if not chunk_specs or not np.isfinite(common_half):
-        return "Wide-aperture composite: no sub-aperture had ≥2 azimuth samples."
-
+    geometry = _composite_geometry(dataset, band_az_indices, freq_hz, unit_scale,
+        recon=recon, elevation_deg=elevation_deg, az_center_deg=az_center_deg,
+        composite_side=composite_side, scene_half_extent_m=scene_half_extent_m,
+        cancel_check=cancel_check)
+    if isinstance(geometry, str):
+        return geometry
+    idx_sorted, az_sorted, physical_az, chunk_specs, half, body_half, pitch, counts = geometry
     full_source_token = _selected_data_token(
         dataset,
         idx_sorted,
@@ -2145,27 +2188,15 @@ def _compute_band_composite(
     )
     if full_source_token is None:
         return "ISAR computation superseded."
-    side = int(composite_side)
-    composite_bytes = 68 * side * side
+    composite_bytes = 4 * counts[0] * counts[1] + BATCH_BYTES
     try:
-        _validate_isar_working_set(
-            composite_bytes,
-            operation="wide-aperture composite",
-            resident_bytes=resident_bytes,
-        )
+        _validate_isar_working_set(composite_bytes, operation="wide-aperture composite",
+                                  resident_bytes=resident_bytes)
     except ValueError as exc:
         return f"ISAR working-set preflight blocked: {exc}"
-
-    half = scene_extents(scene_half_extent_m)
-    hx, hy = (common_half, common_half) if half is None else (
-        min(common_half, half[0] * unit_scale), min(common_half, half[1] * unit_scale))
-    axis = np.linspace(-hx, hx, side)
-    y_axis = np.linspace(-hy, hy, side)
-    xq = axis[:, None].astype(np.float32)
-    yq = y_axis[None, :].astype(np.float32)
-    comp = np.full(
-        (side, side), np.nan, dtype=np.float32
-    )
+    axis, y_axis = [np.linspace(-h, h, n) for h, n in zip(body_half, counts)]
+    axis[len(axis)//2] = y_axis[len(y_axis)//2] = 0.0
+    comp = allocate_result(tuple(counts), np.float32, fill=np.nan)
     az_nonuni = 0.0
     fr_nonuni = 0.0
     az_gap_fraction = 0.0
@@ -2221,31 +2252,35 @@ def _compute_band_composite(
         xa, ya = r["x_range"], r["y_range"]
         dx = float(xa[1] - xa[0])
         dy = float(ya[1] - ya[0])
-        ct, st = np.float32(np.cos(theta_c)), np.float32(np.sin(theta_c))
-        # body (x, y) -> this look's rotated-frame (cross-range, range)
-        fx = (xq * ct - yq * st - np.float32(xa[0])) / np.float32(dx)
-        fy = (xq * st + yq * ct - np.float32(ya[0])) / np.float32(dy)
-        if _cancel_requested(cancel_check):
-            return "ISAR computation superseded."
-        ix = np.floor(fx).astype(np.int32)
-        iy = np.floor(fy).astype(np.int32)
-        valid = (ix >= 0) & (ix < mag.shape[0] - 1) & (iy >= 0) & (iy < mag.shape[1] - 1)
-        wx = (fx - ix).astype(np.float32)
-        wy = (fy - iy).astype(np.float32)
-        np.clip(ix, 0, mag.shape[0] - 2, out=ix)
-        np.clip(iy, 0, mag.shape[1] - 2, out=iy)
-        val = (
-            mag[ix, iy] * (1 - wx) * (1 - wy)
-            + mag[ix + 1, iy] * wx * (1 - wy)
-            + mag[ix, iy + 1] * (1 - wx) * wy
-            + mag[ix + 1, iy + 1] * wx * wy
-        )
-        # Unknown body-grid cells are not measured zero returns. fmax keeps a
-        # previous contributing look when this look is unavailable, while an
-        # unknown-only cell stays NaN through display, artifacts, and ROI stats.
-        val[~valid] = np.nan
-        np.fmax(comp, val, out=comp)
-        del r, mag, fx, fy, ix, iy, valid, wx, wy, val
+        ct, st = float(np.cos(theta_c)), float(np.sin(theta_c))
+        for block in result_blocks(comp.shape, maximum_cells=BATCH_BYTES // 80):
+            xq = axis[block[0], None].astype(np.float64)
+            yq = y_axis[None, block[1]].astype(np.float64)
+            # body (x, y) -> this look's rotated-frame (cross-range, range)
+            fx = (xq * ct - yq * st - float(xa[0])) / dx
+            fy = (xq * st + yq * ct - float(ya[0])) / dy
+            if _cancel_requested(cancel_check):
+                return "ISAR computation superseded."
+            ix = np.floor(fx).astype(np.int32)
+            iy = np.floor(fy).astype(np.int32)
+            valid = (ix >= 0) & (ix < mag.shape[0] - 1) & (iy >= 0) & (iy < mag.shape[1] - 1)
+            wx = (fx - ix).astype(np.float32)
+            wy = (fy - iy).astype(np.float32)
+            np.clip(ix, 0, mag.shape[0] - 2, out=ix)
+            np.clip(iy, 0, mag.shape[1] - 2, out=iy)
+            val = (
+                mag[ix, iy] * (1 - wx) * (1 - wy)
+                + mag[ix + 1, iy] * wx * (1 - wy)
+                + mag[ix, iy + 1] * (1 - wx) * wy
+                + mag[ix + 1, iy + 1] * wx * wy
+            )
+            # Unknown body-grid cells are not measured zero returns. fmax keeps a
+            # previous contributing look when this look is unavailable, while an
+            # unknown-only cell stays NaN through display, artifacts, and ROI stats.
+            val[~valid] = np.nan
+            np.fmax(comp[block], val, out=comp[block])
+            del fx, fy, ix, iy, valid, wx, wy, val
+        del r, mag
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
 
@@ -2266,6 +2301,8 @@ def _compute_band_composite(
         "source_selection_digest": full_source_token.hex(),
         "composite": processed_looks,
         "composite_streamed": True,
+        "composite_grid": {"extent": "union_of_rotated_sublook_coverage",
+            "shape": counts, "pixel_pitch_limit": pitch, "origin_sampled": True},
         "composite_sublooks": [
             {"source_indices": chunk, "center_degrees": float(np.rad2deg(center)),
              "span_degrees": float(np.ptp(physical_az[chunk])), "sample_count": len(chunk)}
@@ -2274,7 +2311,7 @@ def _compute_band_composite(
         "composite_aggregation": "maximum_magnitude",
         "magnitude_missing_value": "nan_outside_sublook_coverage",
         "composite_look_diagnostics": look_diagnostics,
-        "image_contract": {"version": 1, "image_plane": "horizontal", "phase_convention": "unavailable",
+        "image_contract": {"version": 1, "engine_version": ENGINE_VERSION, "image_plane": "horizontal", "phase_convention": "unavailable",
             "phase_center": "dataset_fixed_origin", "amplitude_normalization": "maximum_unit_point_look_gain",
             "image_kind": "maximum_magnitude_composite", "distance_scale_per_metre": unit_scale,
             "cross_range_basis": [1., 0., 0.], "range_basis": [0., 1., 0.], "coordinate_signs": [1, 1]},
@@ -2320,7 +2357,8 @@ def compute_bands(params: dict):
             # Every band digests and slices the same source: validate a
             # retained raw pair once for the formation, not once per read.
             with raw_coverage_scope():
-                return _compute_bands(params)
+                from GRIM_Backend.isar.source_frame import processing_params, restore_source_contract
+                return restore_source_contract(_compute_bands(processing_params(params)), params["dataset"])
 
 
 def _compute_bands(params: dict):
@@ -2336,8 +2374,8 @@ def _compute_bands(params: dict):
     mode = normalize_aperture_mode(params.get("aperture_mode", "auto"))
     half = scene_extents(params.get("scene_half_extent_m"))
     composite_side = params.get("composite_side", _COMPOSITE_GRID_SIDE)
-    if isinstance(composite_side, bool) or int(composite_side) != composite_side or not 32 <= composite_side <= 4096:
-        return "Composite grid side must be an integer between 32 and 4096."
+    if isinstance(composite_side, bool) or int(composite_side) != composite_side or composite_side < 32:
+        return "Composite grid side must be an integer of at least 32."
     progress = params.get("progress")
     for band_az_indices in params["bands"]:
         if _cancel_requested(cancel_check):
@@ -2465,9 +2503,9 @@ def _compute_bands(params: dict):
             result["scene_cropped"] = True
         if params.get("retain_mask_source"):
             result["mask_magnitude"] = result["magnitude"]
-        # GUI rendering can reduce oversized images after formation; headless
-        # callers keep the full numerical grid by disabling this parameter.
-        if params.get("decimate_display", True):
+        # Legacy, explicitly requested overview only. All application plots,
+        # script replays and default headless calls retain the full grid.
+        if params.get("decimate_display", False):
             if _cancel_requested(cancel_check):
                 return "ISAR computation superseded."
             max_side = min(common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
@@ -2516,7 +2554,7 @@ def form_isar(
     elevation_index: int = 0,
     polarization_index: int = 0,
     window: str = "Hanning",
-    reconstruction: str = "fast",
+    reconstruction: str = "auto",
     length_unit: str = "m",
     aperture_center_degrees: float | None = None,
     azimuth_target_degrees: np.ndarray | None = None,
@@ -2541,7 +2579,8 @@ def form_isar(
     ``auto`` uses scene-dependent sampling/curvature advice to choose a PFA.
     ``aperture_mode`` is ``auto`` (legacy >20° max-look policy), ``coherent``
     (any aperture through 360°), or ``composite``. Each composite look is bounded to 10°; grid side
-    is configurable from 32 to 4096. Coherent apertures >=90° automatically use
+    specifies a minimum of 32 pixels on the shorter axis, growing to preserve
+    sublook pixel spacing without a fixed upper pixel limit. Coherent apertures >=90° automatically use
     backprojection regardless of PFA preference. Full circles use the body
     frame at 0° unless a center is supplied, count a closing endpoint once, and
     use uniform angular weighting (the frequency window still applies).
@@ -2558,9 +2597,8 @@ def form_isar(
     Fourier staging spills to disk; each complete padded 1-D FFT still requires RAM.
     ``retain_complex=True`` keeps each coherent band's complex image for
     scientific export; the default returns magnitude only to limit memory.
-    ``decimate_display=True`` applies the GUI's peak-preserving display-only
-    reduction to magnitude after full-resolution formation. It must remain
-    false for scientific result export.
+    ``decimate_display=True`` explicitly requests a legacy pooled overview.
+    Application plots, script replays and scientific exports use the full grid.
     ``legacy_metadata_attested`` is retained only for backward compatibility
     with older recorded scripts. Missing legacy convention metadata is now a
     recorded user assumption. Conflicting/unsupported metadata produces notes,
