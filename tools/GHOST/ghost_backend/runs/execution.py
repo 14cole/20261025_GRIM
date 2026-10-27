@@ -5,12 +5,13 @@ import time
 from pathlib import Path
 
 from ghost_backend.execution.options import (
-    automatic_options, current_options, execution_scope, validate_for_run,
+    current_options, execution_scope, validate_for_run,
 )
+from ghost_backend.runs.controls import CONTROL_FIELDS, run_control_options
 
 
 def driver_options(namespace):
-    """The automatic run profile, bounded by the driver's optional MAX_SOLVE_GB.
+    """The selected run profile, bounded by the driver's optional MAX_SOLVE_GB.
 
     Without one, a GHOST_MAX_SOLVE_GB launch environment still bounds the run.
     """
@@ -19,7 +20,8 @@ def driver_options(namespace):
         import os
         raw = os.environ.get('GHOST_MAX_SOLVE_GB', '').strip()
         budget = float(raw) if raw else None
-    return automatic_options(budget)
+    controls = {field: namespace[name] for name, field in CONTROL_FIELDS.items() if name in namespace}
+    return run_control_options(controls, budget)
 
 
 def driver_execution(function):

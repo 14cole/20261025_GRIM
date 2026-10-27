@@ -7,8 +7,8 @@ REQUEST_SCHEMA = 'grim.2d-run-request'
 
 
 def two_d_request(frequencies_ghz, angles_deg, units, mesh_certification, accuracy,
-                  scattering, observation_angles_deg):
-    """The physical choices of a 2D run; execution settings are always automatic."""
+                  scattering, observation_angles_deg, *, controls=None):
+    """Capture physical choices and optional monostatic execution controls."""
     from ghost_backend.execution.options import automatic_run
     request = dict(schema=REQUEST_SCHEMA, frequencies_ghz=[float(f) for f in frequencies_ghz],
                    angles_deg=[float(a) for a in angles_deg], units=units,
@@ -24,6 +24,11 @@ def two_d_request(frequencies_ghz, angles_deg, units, mesh_certification, accura
     if scattering == 'bistatic' and not request['observation_angles_deg']:
         raise ValueError('Bistatic mode requires at least one observation angle.')
     request.update(automatic_run(scattering))
+    if scattering == 'monostatic':
+        from ghost_backend.runs.controls import run_control_options
+        request['execution_options'] = run_control_options(controls)
+    elif controls:
+        raise ValueError('Advanced 2-D run controls apply only to monostatic scattering.')
     return request
 
 
@@ -99,7 +104,8 @@ class RunSetupMixin:
         scattering = self.cmb_scatter_mode.currentData()
         return two_d_request(freq, angles, self.cmb_units.currentText(),
             self.chk_mesh_certification.isChecked(), self.cmb_accuracy_target.currentData(), scattering,
-            [] if scattering == 'monostatic' else self._parse_list(self.edit_obs_angles.text(), 'Observation angles'))
+            [] if scattering == 'monostatic' else self._parse_list(self.edit_obs_angles.text(), 'Observation angles'),
+            controls=self.twod_options_widget.value() if scattering == 'monostatic' else None)
 
     def _update_run_dimensions(self, *_):
         try:
@@ -145,7 +151,7 @@ class RunSetupMixin:
         return (f"{result['segment_count']} segments; {result['primitive_count']} primitives. "
                 + geometry_dimensions(snapshot,value['units']) + '\n'
                 + f"{len(value['frequencies_ghz'])} frequencies \u00d7 {len(value['angles_deg'])} incident angles; {count} samples per channel, VV + HH. "
-                + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Uncertified single mesh')
+                + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Survey — mesh convergence not checked')
                 + f"; {value['accuracy']} target.\n"
                 + selection_note
                 + ('Warnings: ' + '; '.join(warnings) if warnings else 'Geometry and material checks passed.')

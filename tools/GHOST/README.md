@@ -34,13 +34,26 @@ configurations keep their selected destinations.
 Use the [backend folder map](#ghost-solver-and-feature-workflows) to find solvers, data I/O,
 geometry operations, feature assembly, and run management.
 
-2D runs are automatic. The solver tab and the 2D batch drivers ask only for
-geometry, units, frequencies, azimuths, scattering mode, mesh certification and
-accuracy target. The backend (dense or compressed), adaptive mesh, threads and
-memory admission are chosen for each solve, and completed monostatic
-frequencies are checkpointed for resume. See [running 2D solves](RUN_PROFILES.md).
-The collapsed **Tools** section holds the accuracy/performance report and the
+2D monostatic runs default to adaptive factorization, adaptive meshing, corner
+grading, and mesh certification. Threads and memory admission remain automatic,
+and completed frequencies are checkpointed for resume. The solver tab shows the
+selected policy beside the run options. Its collapsed **Advanced / Tools**
+section provides numerical overrides, the accuracy/performance report, and the
 boundary-density plot.
+
+Both monostatic scripts expose the same choices in their CONFIG blocks:
+
+| Setting | Recommended default | Alternatives and behavior |
+| --- | --- | --- |
+| `FACTORIZATION` | `"adaptive"` | Chooses dense or compressed. Advanced choices: `"dense"`, `"hierarchical"`, `"compressed"`. Dense may use hierarchical factorization internally, with LU fallback. Legacy `"auto"` maps to dense; it does not mean adaptive. |
+| `MESH_STRATEGY` | `"adaptive"` | Adaptive certification selects polynomial meshes. `"local"` and `"global"` use the manual order. |
+| `BASIS_ORDER` | `1` | Choose 1, 2, or 3 for local/global meshes. Ignored for adaptive meshes; the GUI displays **Automatic**. |
+| `MESH_GRADING` | `True` | Grades corners, open ends, and material junctions. |
+| `MESH_CERTIFICATION` | `True` | Checks mesh convergence before certifying a result. `False` is **Survey — mesh convergence not checked**; adaptive survey uses a single P1 reference mesh. Other quality checks still apply. |
+
+Local and HPC run summaries print these choices, and saved execution profiles
+carry them into workers and resumed runs. These controls apply to 2D monostatic
+solves; bistatic and BoR keep their own settings. See [running 2D solves](RUN_PROFILES.md).
 
 For 2D batch sweeps, edit the CONFIG block of `run_local_monostatic.py` or
 `run_hpc_monostatic.py`. BoR drivers also accept

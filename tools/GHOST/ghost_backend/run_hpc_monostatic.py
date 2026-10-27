@@ -25,8 +25,19 @@ FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 
 GEOMETRY_UNITS = "inches"         # "inches" | "meters"
-MESH_CERTIFICATION = True        # True: compare base/fine meshes. False: one uncertified mesh.
+MESH_CERTIFICATION = True        # Recommended. False: Survey — mesh convergence not checked.
 ACCURACY_TARGET = "standard"     # "standard" | "tight"
+
+# --- Advanced numerical controls (recommended defaults below) ---------------
+FACTORIZATION = "adaptive"       # adaptive | dense | hierarchical | compressed
+# Adaptive selects dense or compressed for the problem and memory budget.
+# Dense uses LU / hierarchical internally, with LU fallback. Legacy "auto"
+# remains an alias for dense; it is NOT the adaptive dense/compressed selector.
+MESH_STRATEGY = "adaptive"       # adaptive | local | global
+BASIS_ORDER = 1                   # 1 | 2 | 3; applies only to local/global meshes.
+# Adaptive owns polynomial order (typically P2/P3 certification). BASIS_ORDER
+# is ignored there. With certification off, adaptive runs one P1 reference mesh.
+MESH_GRADING = True               # Recommended: grade corners, ends and junctions.
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
@@ -53,8 +64,8 @@ ARRAY_THROTTLE = None
 PLANNING_WORKERS = None
 
 # ===============================================================================
-# SLURM allocation and job environment. The backend, mesh, threads and memory
-# admission are chosen automatically for each solve.
+# SLURM allocation and job environment. Threads and memory admission remain
+# automatic; numerical choices above are captured for planning and workers.
 # ===============================================================================
 
 # --- SLURM resources (per array task = one node) ---------------------------

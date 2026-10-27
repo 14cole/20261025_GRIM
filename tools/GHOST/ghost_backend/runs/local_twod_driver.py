@@ -24,6 +24,7 @@ from ghost_backend.execution.options import (
     AUTOMATIC_LU_PRECISION, AUTOMATIC_SOLVER_METHOD, current_options,
 )
 from ghost_backend.runs.execution import driver_execution, unit_execution
+from ghost_backend.runs.controls import DRIVER_CONTROL_DEFAULTS, run_control_summary
 
 import json
 import math
@@ -70,6 +71,7 @@ _PARAMETER_KEYS = (
     'WORKERS',
     'PLANNING_WORKERS',
     'MAX_SOLVE_GB',
+    *DRIVER_CONTROL_DEFAULTS,
 )
 _SCRIPT = None
 
@@ -82,7 +84,8 @@ def current_settings():
 def configure(settings, *, script):
     """Install the parameter-block values of the user-facing driver script."""
     global _SCRIPT
-    settings = dict(settings)
+    # Older parameter scripts omit the advanced controls and keep defaults.
+    settings = dict(DRIVER_CONTROL_DEFAULTS, **settings)
     missing = sorted(set(_PARAMETER_KEYS) - set(settings))
     if missing:
         raise ValueError("Driver script is missing parameter(s): " + ", ".join(missing))
@@ -603,6 +606,9 @@ def main() -> 'None':
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
     print(f"  Units total   : {len(ordered)}  (geometry x frequency)")
     print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
+    print(f"  Run policy    : {run_control_summary(current_options(), MESH_CERTIFICATION)}")
+    if MESH_STRATEGY == 'adaptive' and BASIS_ORDER != 1:
+        print(f"  Order note    : requested P{BASIS_ORDER} is ignored; adaptive controls polynomial order.")
     print(f"  Workers       : {pool_size} of {cores} cpus  "
           f"(CPU reservation per solve, assembly and BLAS alike; BLAS team at most {blas_cap}, "
           f"assembly threads/solve: {thread_label})")

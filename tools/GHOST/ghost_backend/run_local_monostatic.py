@@ -26,11 +26,21 @@ AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
 
 GEOMETRY_UNITS = "inches"         # "inches" | "meters"
-MESH_CERTIFICATION = True        # True: compare base/fine meshes. False: one uncertified mesh.
+MESH_CERTIFICATION = True        # Recommended. False: Survey — mesh convergence not checked.
 ACCURACY_TARGET = "standard"     # "standard" | "tight"
 
-# Optional resource caps. The backend, mesh, threads and memory admission are
-# chosen automatically for each solve.
+# --- Advanced numerical controls (recommended defaults below) ---------------
+FACTORIZATION = "adaptive"       # adaptive | dense | hierarchical | compressed
+# Adaptive selects dense or compressed for the problem and memory budget.
+# Dense uses LU / hierarchical internally, with LU fallback. Legacy "auto"
+# remains an alias for dense; it is NOT the adaptive dense/compressed selector.
+MESH_STRATEGY = "adaptive"       # adaptive | local | global
+BASIS_ORDER = 1                   # 1 | 2 | 3; applies only to local/global meshes.
+# Adaptive owns polynomial order (typically P2/P3 certification). BASIS_ORDER
+# is ignored there. With certification off, adaptive runs one P1 reference mesh.
+MESH_GRADING = True               # Recommended: grade corners, ends and junctions.
+
+# Optional resource caps. Threads and memory admission remain automatic.
 WORKERS = None                    # max concurrent solves; None = cpu_count() - 1
 PLANNING_WORKERS = None           # processes for the mesh/storage planning; None = min(8, CPUs), 1 = serial
 MAX_SOLVE_GB = None               # per-solve RAM ceiling in GiB; None = from available RAM

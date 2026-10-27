@@ -50,6 +50,7 @@ from ghost_backend.execution.options import (
     AUTOMATIC_LU_PRECISION, AUTOMATIC_SOLVER_METHOD, current_options,
 )
 from ghost_backend.runs.execution import driver_execution, unit_execution
+from ghost_backend.runs.controls import DRIVER_CONTROL_DEFAULTS, run_control_summary
 
 import argparse
 import json
@@ -118,6 +119,7 @@ _PARAMETER_KEYS = (
     'JOB_PROLOGUE',
     'PYTHON_EXE',
     'SUBMIT',
+    *DRIVER_CONTROL_DEFAULTS,
 )
 _SCRIPT = None
 
@@ -130,7 +132,8 @@ def current_settings():
 def configure(settings, *, script):
     """Install the parameter-block values of the user-facing driver script."""
     global _SCRIPT
-    settings = dict(settings)
+    # Older parameter scripts omit the advanced controls and keep defaults.
+    settings = dict(DRIVER_CONTROL_DEFAULTS, **settings)
     missing = sorted(set(_PARAMETER_KEYS) - set(settings))
     if missing:
         raise ValueError("Driver script is missing parameter(s): " + ", ".join(missing))
@@ -772,6 +775,9 @@ def submit():
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
     print(f"  Units total   : {len(units)}  (geometry x frequency)")
+    print(f"  Run policy    : {run_control_summary(current_options(), MESH_CERTIFICATION)}")
+    if MESH_STRATEGY == 'adaptive' and BASIS_ORDER != 1:
+        print(f"  Order note    : requested P{BASIS_ORDER} is ignored; adaptive controls polynomial order.")
     print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s) "
           f"= {n_slots} parallel nodes")
     cores_str = str(CORES_PER_NODE) if CORES_PER_NODE is not None else "auto (--exclusive)"
@@ -783,12 +789,15 @@ def submit():
         print(f"  Unit peak RAM : {min(peaks):.2f}-{max(peaks):.2f} GB "
               f"estimated (incl. {_MEMORY_SAFETY:g}x safety)")
     hp_units = sum(int(r.get("fine_polynomial_degree", 1)) > 1 for r in schedule["units"])
-    if MESH_CERTIFICATION:
+    if MESH_CERTIFICATION and current_options()['mesh_strategy'] == 'adaptive':
         print(f"  Mesh path     : {hp_units} unit(s) on the hp pair (P2/P3, one coarsened "
               f"mesh), {len(schedule['units']) - hp_units} on the linear pair "
               f"(P1 and P1 x{float(mesh_policy['fine_factor']):g})")
+    elif MESH_CERTIFICATION:
+        print(f"  Mesh path     : P{current_options()['basis_order']} base/fine meshes; "
+              f"requested density refinement x{float(mesh_policy['fine_factor']):g}")
     else:
-        print(f"  Mesh path     : {len(schedule['units'])} single linear mesh(es), "
+        print(f"  Mesh path     : {len(schedule['units'])} single P{current_options()['basis_order']} mesh(es), "
               "uncertified (MESH_CERTIFICATION = False)")
         import ghost_backend.twod.solver as _solver
         ceiling = (
@@ -811,7 +820,7 @@ def submit():
         print(f"                  {idle} of {n_slots} slot(s) have no planned "
               "work -- fewer units than nodes, so those tasks exit at once")
     if not MESH_CERTIFICATION:
-        print("  Certification : OFF -- base mesh only, typically ~3x faster")
+        print("  Certification : Survey — mesh convergence not checked")
         print("                  Downstream use remains enabled; the user owns the")
         print("                  mesh-resolution decision.")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")

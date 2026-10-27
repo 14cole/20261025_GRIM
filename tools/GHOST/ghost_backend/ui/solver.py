@@ -973,13 +973,13 @@ class SolverTab(RunSetupMixin, QWidget):
             "Certify mesh convergence (compare base/fine meshes)"
         )
         self.chk_mesh_certification.setToolTip(
-            "When disabled, run one uncertified mesh and mark the result "
-            "mesh_convergence_certified=false."
+            "Recommended: compare discretizations and publish the refined result only when both channels pass. "
+            "When disabled: Survey — mesh convergence not checked; residual and condition checks remain."
         )
         self.chk_mesh_certification.setChecked(True)
 
         self.btn_tools = QToolButton()
-        self.btn_tools.setText("Tools")
+        self.btn_tools.setText("Advanced / Tools")
         self.btn_tools.setCheckable(True)
         self.btn_tools.setChecked(False)
         self.btn_tools.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -1094,6 +1094,13 @@ class SolverTab(RunSetupMixin, QWidget):
         from ghost_backend.ui.bor_options import BorOptionsWidget
         self.bor_options_widget = BorOptionsWidget()
         self.bor_options_widget.setVisible(False)
+        from ghost_backend.ui.twod_options import TwoDOptionsWidget
+        self.twod_options_widget = TwoDOptionsWidget()
+        tools_form.addRow(self.twod_options_widget)
+        self.lbl_run_policy = QLabel()
+        self.lbl_run_policy.setWordWrap(True)
+        self.twod_options_widget.changed.connect(self._update_run_policy)
+        self.chk_mesh_certification.toggled.connect(self._update_run_policy)
         self.btn_solver_report = QPushButton("Accuracy and performance report...")
         self.btn_solver_report.clicked.connect(self._show_solver_report)
         tools_form.addRow(self.btn_solver_report)
@@ -1124,6 +1131,7 @@ class SolverTab(RunSetupMixin, QWidget):
         options_form.addRow(self.lbl_obs_angles, self.edit_obs_angles)
         options_form.addRow(self.chk_mesh_certification)
         options_form.addRow("Accuracy target", self.cmb_accuracy_target)
+        options_form.addRow(self.lbl_run_policy)
         options_form.addRow(self.lbl_cfie_alpha, self.edit_cfie_alpha)
         options_form.addRow(self.bor_options_widget)
         options_form.addRow(self.lbl_run_dimensions)
@@ -1578,6 +1586,10 @@ class SolverTab(RunSetupMixin, QWidget):
         self.chk_mesh_certification.setEnabled(not busy)
         self.cmb_accuracy_target.setEnabled(not busy)
         self.bor_options_widget.setEnabled(not busy and is_bor)
+        self.twod_options_widget.setVisible(not is_bor and not is_bistatic)
+        self.twod_options_widget.setEnabled(not busy and not is_bor and not is_bistatic)
+        self.lbl_run_policy.setVisible(not is_bor)
+        self._update_run_policy()
         self.btn_tools.setEnabled(not busy)
         self.btn_run.setText("Solving..." if self._is_solving else "Run Solver")
         self.btn_currents.setText(
@@ -1601,6 +1613,14 @@ class SolverTab(RunSetupMixin, QWidget):
     def _set_density_state(self, computing: 'bool') -> 'None':
         self._is_computing_density = bool(computing)
         self._apply_job_state()
+
+    def _update_run_policy(self, *_):
+        from ghost_backend.runs.controls import run_control_options, run_control_summary
+        from ghost_backend.execution.options import automatic_run
+        scattering = self.cmb_scatter_mode.currentData()
+        options = (run_control_options(self.twod_options_widget.value()) if scattering == 'monostatic'
+                   else automatic_run(scattering)['execution_options'])
+        self.lbl_run_policy.setText(run_control_summary(options, self.chk_mesh_certification.isChecked()))
 
     def _on_scatter_mode_changed(self, _index: 'int' = 0) -> 'None':
         is_bistatic = (self.cmb_scatter_mode.currentData() == "bistatic")
