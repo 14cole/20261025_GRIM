@@ -1,11 +1,12 @@
 classdef GrimPlotApp < handle
     % GRIMPLOTAPP Simplified GRIM plotting GUI for MATLAB R2024b.
-    % Base MATLAB only. No data processing or file readers are included.
+    % Base MATLAB only. The included GrimBackend connects all visible actions.
     %
     % RUN (put this file on the MATLAB path):
     %   app = GrimPlotApp;
+    %   app = GrimPlotApp('gui');  % Optional empty GUI without a backend.
     %
-    % CONNECT YOUR BACKEND:
+    % REPLACE THE INCLUDED BACKEND (OPTIONAL):
     %   app.OnAction = @myBackend;
     % The handler signature is:
     %   function myBackend(app, action, state, payload)
@@ -52,7 +53,7 @@ classdef GrimPlotApp < handle
     % Updating GUI values through the public methods emits no callbacks.
     % Auto Plot requests a plot after user dataset/parameter/option changes.
     % Hold, grid and auto-scale are also applied to the visible axes.
-    % Scale, phase, markers, and legend are requests for YOUR renderer.
+    % Scale, phase, markers, and legend are implemented by GrimPlots.
     %
     % File-drop support is intentionally not included: Load uses MATLAB's
     % native multi-file dialog. No third-party drag/drop helper is required.
@@ -71,6 +72,7 @@ classdef GrimPlotApp < handle
         Controls = struct()
         CartesianAxes
         PolarAxes
+        Backend
     end
 
     properties (Access = private)
@@ -87,8 +89,13 @@ classdef GrimPlotApp < handle
     end
 
     methods
-        function app = GrimPlotApp()
+        function app = GrimPlotApp(mode)
+            if nargin<1, mode='full'; end
             app.buildUI();
+            if ~strcmpi(mode,'gui')
+                app.Backend=GrimBackend(app);
+                app.setStatus('Ready. Load datasets to begin. Internal axes: degrees and GHz.');
+            end
             app.UIFigure.Visible = 'on';
         end
 
@@ -434,7 +441,9 @@ classdef GrimPlotApp < handle
         end
 
         function chooseFiles(app)
-            [files, folder] = uigetfile('*.*','Load datasets','MultiSelect','on');
+            [files, folder] = uigetfile({ ...
+                '*.grim;*.mat;*.csv;*.tsv;*.pio;*.cmplx_di;*.ptm;*.ss;*.out;*.cst_data;*.txt;*.dat;*.asc;*.ascii','Supported datasets'; ...
+                '*.*','All files'},'Load datasets','MultiSelect','on');
             if isequal(files,0)
                 return
             end
@@ -457,7 +466,9 @@ classdef GrimPlotApp < handle
             row = event.Indices(1);
             payload = struct('Row',row,'ID',app.DatasetIDs{row}, ...
                 'PreviousName',event.PreviousData,'NewName',event.NewData);
-            app.emit('rename_dataset',payload);
+            if ~app.emit('rename_dataset',payload)
+                app.DatasetTable.Data{row,1}=event.PreviousData;
+            end
         end
 
         function parametersChanged(app, name)

@@ -1,0 +1,3 @@
+Elevation(deg),Azimuth(deg),Frequency(GHz),Polarity,Magnitude(dBsm),Phase(deg),IQ
+0,0,9,VV,0,0,1+0i
+0,30,9,VV,0,90,0+1i

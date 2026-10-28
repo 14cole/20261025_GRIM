@@ -1,0 +1,25 @@
+Name=cut
+Info=
+XStart=-30
+XStop=30
+XStep=30
+XSize=3
+XName=azimuth
+XUnits=deg
+XVals=-30:0:30
+YStart=8
+YStop=10
+YStep=1
+YSize=3
+YName=frequency
+YUnits=GHz
+YVals=8:9:10
+Type=Complex
+Precision=Double
+Order=Little Endian
+DataFormat=Binary
+Polarity=HH
+Elevation=0
+ElevationUnits=deg
+Offset=0000000295
+P}[(ì?ğKtè®Ş¿! sê¹÷?×½»Vÿ ?Í-à¹m@ù?ûfC2ƒî?ÛŸ‘J›ğ?gs‚6$Ü¿DDr/¤ø?º7N³ö‚Å?¶;ò®¯…ø?!æ¶ÓUåñ?81ó:ïñ?A‡ê9BØ¿¢ÄÌ—Nù?™£ çÔ?‚¥8€÷?şk—h:ô?

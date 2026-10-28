@@ -1,0 +1,4 @@
+Frequency,Theta,Phi,RCSPhiScat_PhiInc,PhasePhi_Phi,RCSThetaScat_ThetaInc,PhaseTheta_Theta,RCSPhiScat_ThetaInc,PhasePhi_Theta,RCSThetaScat_PhiInc,PhaseTheta_Phi
+Hz,deg,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg
+9000000000.0,90,0,0,10,3,20,6,30,9,40
+9000000000.0,90,30,1,15,4,25,7,35,10,45

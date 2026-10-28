@@ -1,0 +1,4 @@
+# Ship the small MATLAB validation suite and fixed interchange fixtures.
+# The repository-wide defaults otherwise exclude tests/ and *.grim.
+!tests/
+!tests/**

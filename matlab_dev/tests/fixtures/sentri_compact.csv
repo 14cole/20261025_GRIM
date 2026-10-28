@@ -1,0 +1,4 @@
+freq_MHz_,theta_deg_,phi_deg_,rcs_pp_dBsm_,efield_phase_pp_deg_,rcs_tt_dBsm_,efield_phase_tt_deg_,rcs_pt_dBsm_,efield_phase_pt_deg_,rcs_tp_dBsm_,efield_phase_tp_deg_
+MHz,deg,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg
+9000,90,0,0,10,3,20,6,30,9,40
+9000,90,30,1,15,4,25,7,35,10,45
