@@ -16,9 +16,10 @@ def _set_limits(owner, meshes, *, shared, mode):
     if mode == "delta_map":
         return  # Delta Map keeps its dedicated symmetric difference scale.
     low, high = owner.spin_plot_zmin.value(), owner.spin_plot_zmax.value()
-    limits = common.finite_data_limits(mesh.get_array() for mesh in meshes) if shared and low >= high else None
+    values = lambda mesh: getattr(mesh, "native_values", mesh.get_array())
+    limits = common.finite_data_limits(values(mesh) for mesh in meshes) if shared and low >= high else None
     for mesh in meshes:
-        pair = (low, high) if low < high else (limits or common.finite_data_limits([mesh.get_array()]))
+        pair = (low, high) if low < high else (limits or common.finite_data_limits([values(mesh)]))
         if pair is None:
             continue
         if mode == "range_freq" and low >= high and not owner._plot_scale_is_linear():

@@ -287,7 +287,7 @@ def _prepare(self, dataset, selection, reference, options, *, composite=False) -
     unit_name, unit_scale = computation._length_unit(units_combo.currentText() if units_combo else "in")
 
     recon_combo = getattr(self, "combo_isar_recon", None)
-    recon_text = recon_combo.currentText() if recon_combo is not None else "Recommended"
+    recon_text = recon_combo.currentText() if recon_combo is not None else "Fast PFA (FFT)"
     recon_lower = recon_text.lower()
     if recon_lower.startswith("recommended"):
         recon = "auto"
@@ -442,8 +442,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
 
     # Convert coherent magnitude to generic image intensity. Image formation
     # does not guarantee an absolute square-meter normalization, so neither
-    # branch claims dBsm/dBke. (Magnitude was already max-pool decimated on the
-    # worker; block-max commutes with squaring and log.)
+    # branch claims dBsm/dBke. Retain this full grid for analysis and export;
+    # the image artist alone pools its interactive preview.
     for br in band_results:
         magnitude = np.asarray(br["magnitude"], dtype=np.float32)
         intensity = np.empty_like(magnitude, dtype=np.float32)
@@ -515,7 +515,9 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         x_min, x_max, y_min, y_max = image_extent(br)
         # imshow on a uniform grid is several times faster than pcolormesh
         # for big arrays (1601-frequency datasets feel laggy with pcolormesh).
-        mesh = draw_image(
+        from GRIM_Backend.plotting.adaptive_image import draw_adaptive_image
+        draw = draw_image if br.get("display_decimated") else draw_adaptive_image
+        mesh = draw(
             ax, br, br["isar_display"],
             cmap=cmap,
             vmin=plot_vmin,
@@ -696,7 +698,7 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     if n_bands > 1:
         parts.append(f" ({n_bands} bands)")
     notes = ([] if any(br.get('display_decimated', False) for br in band_results)
-             else ["full computed grid; no automatic display reduction"])
+             else ["adaptive preview; full computed grid for inspection and export"])
     peak_metrics = [br.get('psf', {}).get('sampled_peak') for br in band_results]
     peak_metrics = [metric for metric in peak_metrics if metric]
     if peak_metrics:

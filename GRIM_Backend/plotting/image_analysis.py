@@ -203,7 +203,8 @@ def attach_isar_record(owner, mesh, band, params):
     source_name = next((name for name,candidate in names if candidate is dataset),"ISAR")
     mesh._grim_image_record = ImageRecord(
         f"{source_name} | ISAR | {source['selected_polarization']} | {band['az_values'][0]:g}–{band['az_values'][-1]:g}°",
-        np.asarray(x), np.asarray(y), np.asanyarray(mesh.get_array()).reshape(len(y),len(x)), "cross_range", "range",
+        np.asarray(x), np.asarray(y), np.ma.masked_invalid(
+            getattr(mesh, "native_values", mesh.get_array()), copy=False).reshape(len(y),len(x)), "cross_range", "range",
         params["unit_name"], params["unit_name"], "image_intensity", "linear" if owner._plot_scale_is_linear() else "dB",
         logarithmic=not owner._plot_scale_is_linear(), notes=notes,
         metadata={"kind": "isar", "source_name":source_name, "manifest": manifest, "band": contract})

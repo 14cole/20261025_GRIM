@@ -1565,7 +1565,7 @@ class GrimCutWindow(PlotWorkspaceMixin, DatasetOpsMixin, PlotOpsMixin, QMainWind
             "Coherent backprojection: uses native measured angles and preserves complex phase."
         )
         combo_isar_recon.addItem("Recommended (scene-aware)")
-        combo_isar_recon.setCurrentText("Recommended (scene-aware)")
+        combo_isar_recon.setCurrentText("Fast PFA (FFT)")
         combo_isar_recon.addItem("Coherent backprojection (full azimuth or sector)")
         chk_isar_flip_x = QCheckBox("Flip X")
         chk_isar_flip_x.setToolTip(

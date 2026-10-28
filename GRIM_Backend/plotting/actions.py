@@ -2377,9 +2377,7 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
             return
 
     def _on_isar_peak_scale(self) -> None:
-        """Set the color scale to [peak − N, peak] of the rendered image —
-        the standard ISAR dynamic-range convention. Works on the displayed
-        data, so it's instant (no recompute)."""
+        """Set [peak − N, peak] from the retained image, independent of zoom."""
         if self.last_plot_mode not in ("isar_image", "isar_composite", "az_vs_range"):
             self.status.showMessage("Peak scaling applies to a rendered ISAR or azimuth/range image.")
             return
@@ -2387,14 +2385,11 @@ class PlotOpsMixin(PlotMarkersMixin, PlotSliderMixin, DatasetPlotStyleMixin):
         if not meshes:
             self.status.showMessage("No image to scale — plot one first.")
             return
-        peak = float("-inf")
-        for mesh in meshes:
-            arr = np.asarray(mesh.get_array(), dtype=float)
-            finite = arr[np.isfinite(arr)]
-            if finite.size:
-                peak = max(peak, float(finite.max()))
-        if not np.isfinite(peak):
+        limits = plot_common.finite_data_limits(
+            getattr(mesh, "native_values", mesh.get_array()) for mesh in meshes)
+        if limits is None:
             return
+        peak = limits[1]
         drop = float(self.spin_isar_peak_drop.value())
         if self._plot_scale_is_linear():
             # Linear display is image intensity |I|^2, so an N dB intensity
